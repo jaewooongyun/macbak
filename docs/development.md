@@ -6,8 +6,9 @@
 
 ```bash
 open dist/Macbak.app          # 실행 (Apple silicon, macOS 14 이상 · Liquid Glass는 macOS 26 이상)
-bash scripts/build-app.sh       # 다시 빌드 → dist/Macbak.app (로컬 서명만, 배포 서명·공증 없음, 디버그 기호 제거)
+bash scripts/build-app.sh       # 다시 빌드 → dist/Macbak.app (고정 인증서가 있으면 그 서명, 없으면 로컬 서명 · 공증 없음 · 디버그 기호 제거)
 bash scripts/make-dmg.sh        # 공유용 → dist/Macbak-<버전>.dmg (앱 + Applications 바로가기)
+bash scripts/release.sh --self-test   # 릴리스 검사 함수 시험 (키체인·네트워크 없음) · 릴리스 절차는 아래 "배포"
 swift test                      # 안전 게이트·실행기·기업 보안 제외·휴지통·시뮬레이터 판정·판정·AI 분류·맥박·예약 테스트 (145개)
 dist/Macbak.app/Contents/MacOS/Macbak --snapshot snapshots   # 화면을 PNG로 렌더 (픽스처만, 디스크 정리 대상은 검사하지 않음)
 dist/Macbak.app/Contents/MacOS/Macbak --scan-report          # 실제 디스크를 검사해 후보와 판정을 출력 (읽기 전용, 지우지 않음)
@@ -100,6 +101,16 @@ AI 저장 공간을 처음 열면 폴더 검사가 약 20초 돌며 그동안 �
 
 **실제 창 (2026-11-04 오후, 접근성 API로 조작):** 메뉴 막대 "대시보드…"가 창이 열려 있을 때(한눈에 → 디스크)와 닫혀 있을 때(창이 다시 열리며 디스크) 모두 디스크 화면을 엽니다. 패널의 얕은 정리 칸은 "검사하는 중…" → "아직 검사하지 않음 · 검사" → (검사 누름) → 41초 뒤 "3개 · 검사 30초 전 · 즉시 정리 · 94 MB"로 바뀌었고, 깊은 정리 줄은 "기기 AI가 살펴보는 중 0/5"를 보였습니다. 시험용 앱 캐시(`macbak-veto-probe`, 확인 뒤 지움)는 검사 직후 기기 AI 확인 대기로 체크가 꺼져 있다가, AI가 거부하지 않자 대시보드에서 체크가 켜졌습니다(`reselect` 연결 확인).
 
+## 배포
+
+업데이트는 Sparkle로 받습니다. 앱은 하루에 한 번 GitHub Releases의 `appcast.xml`을 읽고 새 버전이 있으면 변경 내용을 보여 주며 설치할지 묻습니다. 업데이트 파일은 EdDSA 키로, 앱은 고정 인증서 `Macbak Self Signing`으로 서명합니다. 설치된 앱은 업데이트의 EdDSA 서명이 앱 안 공개 키와 맞거나 새 앱이 설치된 앱과 같은 인증서로 서명돼 있을 때 업데이트를 받습니다. 그래서 둘 중 하나만 잃었다면 남은 하나로 새 키나 새 인증서를 넘겨줄 수 있습니다. 이는 지금처럼 DMG로 내고 `SUVerifyUpdateBeforeExtraction`을 켜지 않을 때의 동작입니다. 다만 인증서가 바뀌면 macOS가 다른 앱으로 보고 Finder 제어 같은 권한을 다시 묻습니다. 잃었을 때는 새로 만들기 전에 먼저 백업에서 가져옵니다. 둘 다 잃으면 사용자가 새 버전을 직접 받아 설치해야 합니다.
+
+1. 인증서: 코드 서명용 자체 서명 인증서 `Macbak Self Signing`을 로그인 키체인에 둡니다(키체인 접근 → 인증서 지원 → 인증서 생성 · 이메일과 조직은 비움). 신뢰 설정은 바꾸지 않습니다. 처음 서명할 때 키체인이 물으면 "항상 허용"을 고릅니다. `build-app.sh`는 맨 위 `RELEASE_CERT`(인증서 SHA-1 지문)와 같은 인증서로 서명할 때만 업데이트 정보를 넣습니다. 그 인증서가 없거나 이름만 같은 다른 인증서면 업데이트를 확인하지 않는 빌드가 됩니다.
+2. EdDSA 키: `swift build` 뒤 `.build/artifacts/sparkle/Sparkle/bin/generate_keys --account macbak`으로 만들고 출력된 공개 키를 `scripts/build-app.sh`의 `PUBLIC_ED_KEY`에 넣습니다. 백업은 암호를 건 디스크 이미지를 열고 그 안으로 바로 `generate_keys --account macbak -x <이미지 안 경로>`를 실행합니다. 내보낸 파일은 암호화되지 않은 키라 이미지 밖에 두지 않습니다. 복구는 `-f`로 가져옵니다.
+3. 버전: `scripts/build-app.sh` 맨 위 `VERSION`과 `BUILD`를 올립니다. Sparkle은 정수 `BUILD`로 새 버전을 가리므로 늘 앞 릴리스보다 커야 합니다.
+4. 릴리스 준비: 변경을 커밋한 뒤 `MACBAK_RELEASE_SCANNER=<검사기> bash scripts/release.sh <노트.md>`를 실행합니다. 검사기는 저장소 밖에 둔 프로그램으로 파일 경로를 인자로 받아 깨끗하면 0으로 끝납니다. 0.1.0 다음 첫 업데이터 릴리스는 공개 `appcast.xml`이 아직 없으므로 `--first-updater-release`를 붙입니다. 바뀐 파일에 스크린숏 같은 이진 파일이 있으면 스크립트가 목록을 보여 주고 멈춥니다. 하나씩 직접 본 뒤 `--binaries-checked`를 붙여 다시 실행합니다. 스크립트는 DMG를 만들어 서명과 빌드 번호를 확인하고 노트를 담은 `appcast.xml`을 만듭니다. 그다음 바뀐 소스, 커밋 기록, 노트, appcast, DMG 안의 앱을 검사해 `dist/release/v<버전>/`에 모읍니다.
+5. 게시: 스크립트가 마지막에 출력한 태그와 `gh release` 명령을 사람이 차례로 실행합니다. 릴리스를 초안으로 만들어 자산을 모두 올린 뒤 공개하므로 `appcast.xml`이 없는 릴리스가 최신이 되지 않습니다.
+
 ## 다음 단계
 
 아직 만들지 않았습니다.
@@ -111,12 +122,13 @@ AI 저장 공간을 처음 열면 폴더 검사가 약 20초 돌며 그동안 �
 
 ```
 Sources/Macbak/
-  App/       진입점과 창(MacbakApp), 메뉴 막대, 설정, --snapshot 렌더러, --scan-report
+  App/       진입점과 창(MacbakApp), 메뉴 막대, 설정, 업데이터(Updater), --snapshot 렌더러, --scan-report
   Cleanup/   재료(lsof·트리 워크·식별자) · 경로 가드 · 분류 규칙(CacheRules) · 대상 모델 · 스캐너(Xcode·앱 캐시·기기·개발 도구와 기타) · 코디네이터 · 실행기와 기록
   System/    디스크·메모리·CPU·GPU 조회(SystemMonitor), 판정 규칙(Evidence·evaluate), 시뮬레이터 메모리(SimulatorMemory), 루프 예약
   AI/        도구 카탈로그(AICatalog) · 프로세스 분류 · 세션·작업 판독 · 감시기 · 저장 공간 스캐너 · 기기 AI 탐색(CacheExplorer)
   UI/        토큰과 의미 색(Theme) · 카드·타일·AdaptiveGrid·유리(Containers) · 게이지·막대(Visuals) · 맥박(Pulse) · 진행 패널(RunPanel) · 탐지 카드·AI 표지·명령 칩(ExploreViews)
   Screens/   사이드바와 화면 전환(RootView), 화면 6개, 정리 목록(CleanupBoard)
 Tests/MacbakTests/   안전 게이트 · 실행기 · 기업 보안 제외 · 시뮬레이터 판정 · 판정 규칙 · 분류 규칙(Python 대조 675행) · 기기 AI 판정 · AI 분류와 기록 집계 · 맥박 · 예약 계산
-scripts/build-app.sh  릴리스 빌드와 앱 번들 만들기
+scripts/build-app.sh  릴리스 빌드와 앱 번들 만들기(Sparkle 넣기 · 서명)
+scripts/release.sh    릴리스 준비(빌드 번호 · appcast · 공개 전 검사 · 게시 명령 출력)
 ```
