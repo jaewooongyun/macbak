@@ -5,8 +5,8 @@
 # from source on another Mac, even with a certificate of the same name or one picked with MACBAK_SIGN_IDENTITY, carries
 # no feed and never replaces itself with a build signed by someone else.
 set -euo pipefail
-VERSION=0.1.0
-BUILD=3
+VERSION=0.2.0
+BUILD=4
 RELEASE_CERT=34627E82A5ACE2A75F3906068089D4FAE3CECAF4
 FEED_URL="https://github.com/jaewooongyun/macbak/releases/latest/download/appcast.xml"
 PUBLIC_ED_KEY="aLuGd26ThurOLARwj0nkGsPfLG790uqfk+WnGg06y6Y="
