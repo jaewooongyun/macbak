@@ -1,0 +1,336 @@
+import Darwin
+import Foundation
+import os
+
+// The facts a clean-up judgment is made of. Each probe reports what it could not read instead of guessing, so a failure
+// can only ever keep something, never clear it for deletion.
+
+/// Whether Xcode or the command-line tools are installed. `/usr/bin/xcrun` and `/usr/bin/git` are stubs that, on a Mac
+/// without them, open a dialog offering to install the tools; `xcode-select -p` only reports. Asked once per launch.
+enum DeveloperTools {
+    static let available: Bool = {
+        guard let output = Command.run("/usr/bin/xcode-select", ["-p"], timeout: .seconds(5)), output.status == 0 else { return false }
+        let path = String(decoding: output.stdout, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        return !path.isEmpty && FileManager.default.fileExists(atPath: path)
+    }()
+}
+
+/// Runs a command and returns its output, or nil when it could not start or ran past `timeout`.
+enum Command {
+    struct Output: Sendable {
+        let status: Int32
+        let stdout: Data
+    }
+
+    /// - Important: Returns by the deadline whatever the command does. Waiting for its output or its exit without one hung
+    ///   the caller for good when a process ignored SIGTERM, was stuck in the kernel (`lsof` on a dead network volume), or
+    ///   left a child holding the output pipe; a run waiting on `lsof` then stayed "정리하는 중" forever. After the deadline
+    ///   the process gets SIGTERM, then SIGKILL two seconds later, and the reading thread is abandoned if still blocked.
+    static func run(_ executable: String, _ arguments: [String], timeout: Duration) -> Output? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        process.standardInput = FileHandle.nullDevice
+        let exited = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in exited.signal() }
+        do { try process.run() } catch { return nil }
+
+        // Read on another thread, all the way to the end so a large output never fills the pipe and stalls the process.
+        let output = OSAllocatedUnfairLock<Data?>(initialState: nil)
+        let read = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .utility).async {
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            output.withLock { $0 = data }
+            read.signal()
+        }
+        let deadline = DispatchTime.now() + timeout.seconds
+        guard exited.wait(timeout: deadline) == .success else {
+            process.terminate()
+            if exited.wait(timeout: .now() + 2) == .timedOut { kill(process.processIdentifier, SIGKILL) }
+            return nil
+        }
+        // Exited, but a child it left may still hold the pipe: the output is only whole once it closes.
+        guard read.wait(timeout: max(deadline, .now() + 1)) == .success, let data = output.withLock({ $0 }) else { return nil }
+        return Output(status: process.terminationStatus, stdout: data)
+    }
+}
+
+extension Duration {
+    var seconds: Double { Double(components.seconds) + Double(components.attoseconds) / 1e18 }
+}
+
+/// Paths that running processes have open, from one `lsof` run.
+/// - Important: `capture()` returns nil when `lsof` fails, times out or prints implausibly little, and nil means nothing
+///   may count as unused. A missing snapshot must never read as "nothing is open".
+struct OpenFiles: Sendable {
+    /// A full snapshot is tens of thousands of lines; a few hundred means `lsof` saw almost nothing.
+    static let minimumLines = 1_000
+
+    /// Case-folded and sorted, so a prefix lookup is a binary search.
+    private let paths: [String]
+
+    static func capture() -> OpenFiles? {
+        Command.run("/usr/sbin/lsof", ["-n", "-Fpcn"], timeout: .seconds(15)).flatMap { parse($0) }
+    }
+
+    /// `-Fpcn` prints a `p<pid>` and a `c<command>` line per process and an `n<name>` line per open file; names that are
+    /// not paths are skipped, and so are Macbak's own. Its scans hold folders open while walking them, which made the
+    /// build caches it was reading look in use (2026-11-04). Any process named Macbak counts as its own, so a second
+    /// copy (a measurement copy, `--scan-report`) does not mark the app's caches in use either.
+    static func parse(_ output: Command.Output, ownPID: Int32 = getpid()) -> OpenFiles? {
+        guard output.status == 0 else { return nil }
+        let lines = String(decoding: output.stdout, as: UTF8.self).split(separator: "\n")
+        guard lines.count >= minimumLines else { return nil }
+        var own = false
+        var paths: [String] = []
+        for line in lines {
+            switch line.first {
+            case "p": own = Int32(line.dropFirst()) == ownPID
+            case "c": if line.dropFirst() == "Macbak" { own = true }
+            case "n": if !own, line.hasPrefix("n/") { paths.append(PathKey.fold(String(line.dropFirst()))) }
+            default: break
+            }
+        }
+        return OpenFiles(paths: paths.sorted())
+    }
+
+    /// Whether a process has `root` itself, or anything below it, open. `/a/b-old` is not below `/a/b`.
+    /// - Note: A trailing `/` is ignored: `URL.path(percentEncoded:)` leaves one on folder URLs, while `lsof` never does.
+    func anyOpen(under root: String) -> Bool {
+        var key = PathKey.fold(root)
+        while key.count > 1, key.hasSuffix("/") { key.removeLast() }
+        if contains(key) { return true }
+        let prefix = key.hasSuffix("/") ? key : key + "/"
+        let index = lowerBound(prefix)
+        return index < paths.count && paths[index].hasPrefix(prefix)
+    }
+
+    private func contains(_ key: String) -> Bool {
+        let index = lowerBound(key)
+        return index < paths.count && paths[index] == key
+    }
+
+    private func lowerBound(_ key: String) -> Int {
+        var low = 0, high = paths.count
+        while low < high {
+            let mid = (low + high) / 2
+            if paths[mid] < key { low = mid + 1 } else { high = mid }
+        }
+        return low
+    }
+}
+
+/// SwiftPM's package checkouts in a build cache (`…/SourcePackages/checkouts/<package>/`) are git working trees. An item
+/// there that is exactly what the package's fetched history holds is the package's own; the next build fetches it again.
+/// - Important: Fails closed. All must hold, or the answer is false: the checkout's HEAD is contained in a remote-tracking
+///   ref and no local branch or stash holds a commit the remote-tracking refs lack (a commit made only here would be
+///   lost with the checkout), and every regular file on disk at the path is a blob HEAD has there
+///   with the same bytes (a folder document such as a `.numbers` bundle is compared file by file). Links,
+///   submodules, git failing or taking over ten seconds all answer false.
+/// - Note: Nothing is written and the index is never read, so git does not refresh it (a write that would make the cache
+///   look used); `--no-filters` runs no `.gitattributes` filter program.
+enum PackageCheckout {
+    static func isPristine(_ url: URL) -> Bool {
+        let path = url.path(percentEncoded: false)
+        let parts = path.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        // Without developer tools (Xcode removed, its build caches left behind) git would open an install dialog.
+        guard let at = parts.indices.dropFirst().first(where: { parts[$0].lowercased() == "checkouts" && parts[$0 - 1].lowercased() == "sourcepackages" }),
+              at + 2 < parts.count, DeveloperTools.available else { return false }
+        let root = parts[...(at + 1)].joined(separator: "/")
+        /// The output of a command that succeeded, empty or not; nil when it failed.
+        func run(_ arguments: [String]) -> Data? {
+            guard let output = Command.run("/usr/bin/git", ["-C", root, "--literal-pathspecs"] + arguments, timeout: .seconds(10)),
+                  output.status == 0 else { return nil }
+            return output.stdout
+        }
+        func git(_ arguments: [String]) -> Data? { run(arguments).flatMap { $0.isEmpty ? nil : $0 } }
+        guard git(["for-each-ref", "--contains", "HEAD", "--count=1", "--format=%(refname)", "refs/remotes"]) != nil,
+              // The whole checkout goes with the cache, so no branch or stash may hold a commit the remote does not have.
+              run(["rev-list", "-n", "1", "--branches", "--glob=refs/stash", "--not", "--remotes"])?.isEmpty == true,
+              let tree = git(["ls-tree", "-r", "-z", "HEAD", "--", parts[(at + 2)...].joined(separator: "/")]) else { return false }
+        // "<mode> blob <hash>\t<path>", one per regular file HEAD has at the path.
+        var committed: [String: String] = [:]
+        for entry in tree.split(separator: 0) {
+            let line = String(decoding: entry, as: UTF8.self)
+            guard let tab = line.firstIndex(of: "\t") else { return false }
+            let fields = line[..<tab].split(separator: " ")
+            guard fields.count == 3, fields[0] == "100644" || fields[0] == "100755", fields[1] == "blob" else { return false }
+            committed[String(line[line.index(after: tab)...])] = String(fields[2])
+        }
+        guard let disk = regularFiles(at: url), !disk.isEmpty, disk.allSatisfy({ $0.hasPrefix(root + "/") }),
+              let hashes = git(["hash-object", "--no-filters", "--"] + disk) else { return false }
+        // A file HEAD does not have there finds no blob and fails; a committed file missing on disk deletes nothing.
+        let lines = String(decoding: hashes, as: UTF8.self).split(separator: "\n").map(String.init)
+        return lines.count == disk.count && zip(disk, lines).allSatisfy { committed[String($0.dropFirst(root.count + 1))] == $1 }
+    }
+
+    /// The item itself if it is a regular file, or every file below it if it is a folder; nil on a link or anything else.
+    private static func regularFiles(at url: URL) -> [String]? {
+        let keys: [URLResourceKey] = [.isRegularFileKey, .isDirectoryKey, .isSymbolicLinkKey]
+        guard let top = try? url.resourceValues(forKeys: Set(keys)), top.isSymbolicLink != true else { return nil }
+        if top.isRegularFile == true { return [url.path(percentEncoded: false)] }
+        var unreadable = false
+        guard top.isDirectory == true,
+              let walker = FileManager.default.enumerator(at: url, includingPropertiesForKeys: keys, options: [],
+                                                          errorHandler: { _, _ in unreadable = true; return false }) else { return nil }
+        var files: [String] = []
+        for case let item as URL in walker {
+            guard let values = try? item.resourceValues(forKeys: Set(keys)), values.isSymbolicLink != true else { return nil }
+            if values.isRegularFile == true { files.append(item.path(percentEncoded: false)) } else if values.isDirectory != true { return nil }
+        }
+        return unreadable ? nil : files
+    }
+}
+
+/// Comparable form of a path on APFS, which ignores case and Unicode normalization by default.
+enum PathKey {
+    static func fold(_ path: String) -> String { path.precomposedStringWithCanonicalMapping.lowercased() }
+}
+
+/// Which file a path pointed at when it was scanned. A different identity at deletion time means the path was replaced.
+/// Which item a path names, and whether it changed. Equal only when it is the same item, not modified since.
+/// - Note: A folder's own modification time moves when an entry directly inside is added, removed or renamed — a new
+///   result bundle, a replaced `info.plist` — but not when a file deeper down is written. It catches those without a re-walk.
+struct FileIdentity: Hashable, Sendable {
+    let device: UInt64
+    let inode: UInt64
+    let modifiedSeconds: Int64
+    let modifiedNanoseconds: Int64
+
+    /// The item itself, not what a symbolic link points to; nil when it cannot be read.
+    static func of(_ path: String) -> FileIdentity? {
+        var info = stat()
+        guard lstat(path, &info) == 0 else { return nil }
+        return FileIdentity(device: UInt64(info.st_dev), inode: UInt64(info.st_ino),
+                            modifiedSeconds: Int64(info.st_mtimespec.tv_sec), modifiedNanoseconds: Int64(info.st_mtimespec.tv_nsec))
+    }
+}
+
+/// What one walk of a folder found.
+struct TreeFacts: Equatable, Sendable {
+    var bytes: Int64 = 0
+    var files = 0
+    var newest: Date?
+    /// The files counted in `bytes` when the walk was asked to collect them (`olderThan` with `collect: true`).
+    var listed: [FileStamp] = []
+    /// Why the walk is incomplete — an unreadable item, missing metadata, the time budget — or nil when every item was read.
+    var gap: String?
+    /// The first name anywhere inside that the caller's `alarm` matched, folders and links included.
+    var alarm: String?
+    /// The first name anywhere inside that the caller's `notice` matched, the same way.
+    var noticed: String?
+
+    var isComplete: Bool { gap == nil }
+
+    /// Time since the newest file changed. nil when the walk is incomplete or found no file: both mean "cannot tell".
+    func idle(at now: Date) -> TimeInterval? {
+        guard isComplete, let newest else { return nil }
+        return now.timeIntervalSince(newest)
+    }
+}
+
+/// Walks a folder for its allocated size and newest regular file, without following symbolic links.
+/// - Important: The folder's own modification date is never used. It can lag the newest file inside by months, which
+///   would make a cache in use look abandoned.
+/// - Warning: Any unreadable item, missing date or budget hit leaves `gap` set. The old `FolderScanner` skipped such items
+///   silently; that is fine for a size label and unsafe for a delete decision.
+enum TreeWalk {
+    private static let keys: Set<URLResourceKey> = [
+        .isRegularFileKey, .isDirectoryKey, .isSymbolicLinkKey, .contentModificationDateKey, .totalFileAllocatedSizeKey,
+    ]
+
+    /// - Parameters:
+    ///   - olderThan: count only files last changed before this date in `bytes` and `files`; `newest` still sees all.
+    ///   - collect: also list those files, with their identity, for deleting exactly them later.
+    ///   - alarm: items to report in `alarm` wherever they are, so a deep key or disk image can keep the whole row; it is
+    ///     told whether the item is a folder.
+    ///   - notice: items to report in `noticed` the same way, for a milder consequence.
+    static func inspect(_ url: URL, budget: Duration = .seconds(60), olderThan cutoff: Date? = nil, collect: Bool = false,
+                        alarm: (@Sendable (URL, Bool) -> Bool)? = nil, notice: (@Sendable (URL) -> Bool)? = nil,
+                        clock: ContinuousClock = ContinuousClock()) -> TreeFacts {
+        var facts = TreeFacts()
+        guard let top = try? url.resourceValues(forKeys: keys) else {
+            facts.gap = "읽을 수 없음"
+            return facts
+        }
+        if top.isSymbolicLink == true {
+            facts.gap = "심볼릭 링크"
+            return facts
+        }
+        // The item itself counts too: a key file can sit directly in a cache folder's parent.
+        if let alarm, alarm(url, top.isDirectory == true) { facts.alarm = url.lastPathComponent }
+        if let notice, notice(url) { facts.noticed = url.lastPathComponent }
+        if top.isRegularFile == true {
+            add(top, at: url, to: &facts, cutoff: cutoff, collect: collect)
+            return facts
+        }
+
+        var failure: String?
+        guard let walker = FileManager.default.enumerator(at: url, includingPropertiesForKeys: Array(keys), options: [],
+                                                          errorHandler: { item, error in
+                                                              failure = "\(item.lastPathComponent): \(error.localizedDescription)"
+                                                              return false
+                                                          })
+        else {
+            facts.gap = "열 수 없음"
+            return facts
+        }
+        let deadline = clock.now.advanced(by: budget)
+        for case let item as URL in walker {
+            // Checked on every item, folders included, so a tree of empty folders cannot outrun the budget.
+            if clock.now >= deadline {
+                facts.gap = "시간 초과"
+                return facts
+            }
+            guard let values = try? item.resourceValues(forKeys: keys) else {
+                facts.gap = "읽을 수 없음: \(item.lastPathComponent)"
+                return facts
+            }
+            // Before the regular-file filter: disk images and archives are often folders (.sparsebundle, .xcarchive).
+            if facts.alarm == nil, let alarm, alarm(item, values.isDirectory == true) { facts.alarm = item.lastPathComponent }
+            if facts.noticed == nil, let notice, notice(item) { facts.noticed = item.lastPathComponent }
+            guard values.isSymbolicLink != true, values.isRegularFile == true else { continue }
+            guard values.contentModificationDate != nil else {
+                facts.gap = "날짜 없음: \(item.lastPathComponent)"
+                return facts
+            }
+            add(values, at: item, to: &facts, cutoff: cutoff, collect: collect)
+        }
+        if let failure { facts.gap = failure }
+        return facts
+    }
+
+    /// Walks several folders at once, results in the same order. Hundreds of build caches walked one after another took
+    /// minutes; an SSD answers many folders in parallel.
+    static func inspectAll(_ urls: [URL], budget: Duration = .seconds(60), alarm: (@Sendable (URL, Bool) -> Bool)? = nil,
+                           notice: (@Sendable (URL) -> Bool)? = nil) -> [TreeFacts] {
+        let results = OSAllocatedUnfairLock(initialState: [TreeFacts?](repeating: nil, count: urls.count))
+        DispatchQueue.concurrentPerform(iterations: urls.count) { index in
+            let facts = inspect(urls[index], budget: budget, alarm: alarm, notice: notice)
+            results.withLock { $0[index] = facts }
+        }
+        return results.withLock { found in found.map { $0 ?? TreeFacts(gap: "검사하지 못함") } }
+    }
+
+    private static func add(_ values: URLResourceValues, at url: URL, to facts: inout TreeFacts, cutoff: Date?, collect: Bool) {
+        guard let modified = values.contentModificationDate else {
+            facts.gap = "날짜 없음"
+            return
+        }
+        if modified > (facts.newest ?? .distantPast) { facts.newest = modified }
+        if let cutoff, modified >= cutoff { return }
+        let bytes = Int64(values.totalFileAllocatedSize ?? 0)
+        facts.bytes += bytes
+        facts.files += 1
+        guard collect else { return }
+        let path = url.path(percentEncoded: false)
+        guard let identity = FileIdentity.of(path) else {
+            facts.gap = "읽을 수 없음: \(url.lastPathComponent)"
+            return
+        }
+        facts.listed.append(FileStamp(path: path, identity: identity, modified: modified, bytes: bytes))
+    }
+}
