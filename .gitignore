@@ -1,0 +1,9 @@
+.build/
+.swiftpm/
+.DS_Store
+dist/
+snapshots/
+NOTASK-*/
+.claude/
+.serena/
+.codegraph/
