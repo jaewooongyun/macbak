@@ -63,12 +63,14 @@ enum SnapshotRunner {
             // .zero = size to fit, the way the real menu bar panel sizes itself (a fixed height hid a truncation bug).
             let panel = MenuBarPanel().environment(system).environment(loop).environment(ai).environment(aiStorage).environment(cleanup).environment(CleanupRunner()).environment(AppNavigation())
             failures += render(panel, size: .zero, look: look, to: outputDirectory.appendingPathComponent("menubar-\(name).png"))
-            let settings = SettingsView().environment(system).environment(MenuBarSettings(defaults: nil))
+            // Rendered from inside the built app, whose bundle would turn a real updater on; this one never starts.
+            let updater = AppUpdater.disabled(reason: "미리 보기에서는 업데이트를 확인하지 않습니다.")
+            let settings = SettingsView().environment(system).environment(MenuBarSettings(defaults: nil)).environment(updater)
             failures += render(settings, size: .zero, look: look, to: outputDirectory.appendingPathComponent("settings-\(name).png"))
             // Everything on: the widest menu bar item, whose preview once overflowed the settings window.
             let everything = MenuBarSettings(defaults: nil)
             everything.content = MenuBarContent(pulse: true, memory: true, disk: true, value: true, graph: true)
-            failures += render(SettingsView().environment(system).environment(everything), size: .zero, look: look,
+            failures += render(SettingsView().environment(system).environment(everything).environment(updater), size: .zero, look: look,
                                to: outputDirectory.appendingPathComponent("settings-all-\(name).png"))
             // A clean-up part way, as the menu bar panel shows it, with its stop button.
             var going = RunProgress(steps: (1...3).map { RunStep(id: "\($0)", name: "app-\($0) (Xcode)", icon: .symbol("hammer"), amount: 4.9e9, amountText: "4.9 GB") })

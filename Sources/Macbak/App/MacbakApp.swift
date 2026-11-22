@@ -2,10 +2,13 @@ import SwiftUI
 
 @main
 enum Entry {
-    /// `--snapshot <dir>` renders every screen to PNG in light and dark, then exits; `--scan-report` prints a read-only scan.
+    /// `--snapshot <dir>` renders every screen to PNG in light and dark, then exits; `--scan-report` prints a read-only scan;
+    /// `--version` prints `<version> (<build>)` from the bundle, which also proves the linked frameworks load.
     @MainActor static func main() {
         let args = CommandLine.arguments
-        if let flag = args.firstIndex(of: "--snapshot") {
+        if args.contains("--version") {
+            print(AppUpdater.versionText(Bundle.main.infoDictionary))
+        } else if let flag = args.firstIndex(of: "--snapshot") {
             let dir = args.indices.contains(flag + 1) ? args[flag + 1] : "snapshots"
             SnapshotRunner.run(outputDirectory: URL(fileURLWithPath: dir))
         } else if args.contains("--scan-report") {
@@ -67,6 +70,7 @@ struct MacbakApp: App {
     @State private var runner: CleanupRunner
     @State private var menuBar = MenuBarSettings()
     @State private var navigation: AppNavigation
+    @State private var updater = AppUpdater(bundle: .main)
 
     init() {
         // Started here, not in a view, so monitoring and the loop keep running with the window closed.
@@ -127,6 +131,9 @@ struct MacbakApp: App {
         }
         .defaultSize(width: 1180, height: 800)
         .commands {
+            CommandGroup(after: .appInfo) {
+                CheckForUpdatesButton(updater: updater)
+            }
             SidebarCommands()
             CommandGroup(after: .toolbar) {
                 Button("새로 고침") { system.refreshAll() }
@@ -154,6 +161,17 @@ struct MacbakApp: App {
             SettingsView()
                 .environment(system)
                 .environment(menuBar)
+                .environment(updater)
         }
+    }
+}
+
+/// A view, not a bare button, so reading `canCheck` in its body keeps the menu item's enabled state current.
+private struct CheckForUpdatesButton: View {
+    let updater: AppUpdater
+
+    var body: some View {
+        Button("업데이트 확인…") { updater.checkNow() }
+            .disabled(!updater.canCheck)
     }
 }

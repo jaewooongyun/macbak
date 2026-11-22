@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SettingsView: View {
     @Environment(MenuBarSettings.self) private var settings
+    @Environment(AppUpdater.self) private var updater
 
     var body: some View {
         @Bindable var settings = settings
@@ -49,6 +50,25 @@ struct SettingsView: View {
                 MenuBarPreview()
             }
             .opacity(settings.isShown ? 1 : 0.4)
+
+            Section {
+                LabeledContent("현재 버전", value: updater.version)
+                Toggle("자동으로 확인", isOn: Binding(get: { updater.automaticallyChecks }, set: { updater.setAutomaticallyChecks($0) }))
+                Toggle("새 버전을 자동으로 받아 설치",
+                       isOn: Binding(get: { updater.automaticallyInstalls }, set: { updater.setAutomaticallyInstalls($0) }))
+                    .disabled(!updater.automaticallyChecks)
+                Button("지금 확인") { updater.checkNow() }
+                    .disabled(!updater.canCheck)
+            } header: {
+                Text("업데이트")
+            } footer: {
+                Text(updater.disabledReason ?? (updater.automaticallyChecks
+                    ? "하루에 한 번 새 버전을 확인하고, 있으면 설치할지 묻습니다. 업데이트를 확인하고 내려받을 때만 GitHub의 배포 위치에 접속합니다."
+                    : "자동 확인이 꺼져 있어 '지금 확인'을 누를 때만 새 버전을 확인합니다. 업데이트를 확인하고 내려받을 때만 GitHub의 배포 위치에 접속합니다."))
+                    .multilineTextAlignment(.leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .disabled(updater.disabledReason != nil)
         }
         .formStyle(.grouped)
         .frame(width: 460)
