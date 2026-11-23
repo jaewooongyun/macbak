@@ -20,13 +20,18 @@ final class CleanupRunner {
     /// Drops deleted rows from the lists every screen reads, once a run ends — whoever started it. Done in one place:
     /// the dashboard once only hid them in its own view, and the menu then offered them again.
     @ObservationIgnored private let forget: @MainActor (Set<String>) -> Void
+    @ObservationIgnored private let background: BackgroundDeletion
+    /// The wait for the latest run's background deletes; the next run cancels it, since its deletes would mix in.
+    @ObservationIgnored private var waiting: Task<Void, Never>?
 
     init(executor: CleanupExecutor = CleanupExecutor(), latest: @escaping @MainActor (String) -> CleanupCandidate? = { _ in nil },
-         settle: @escaping @MainActor () async -> Void = {}, forget: @escaping @MainActor (Set<String>) -> Void = { _ in }) {
+         settle: @escaping @MainActor () async -> Void = {}, forget: @escaping @MainActor (Set<String>) -> Void = { _ in },
+         background: BackgroundDeletion = BackgroundDeletion()) {
         self.executor = executor
         self.latest = latest
         self.settle = settle
         self.forget = forget
+        self.background = background
     }
 
     /// - Parameter shallow: the rows were not chosen one by one (the immediate clean-up, the loop), so each must still be
@@ -37,6 +42,7 @@ final class CleanupRunner {
         guard !isRunning else { return CleanupExecutor.Report(refusal: "이미 정리하는 중입니다.") }
         isRunning = true
         isLoopRun = byLoop
+        waiting?.cancel()
         defer {
             isRunning = false
             isStopping = false
@@ -49,6 +55,24 @@ final class CleanupRunner {
                                         stop: { [weak self] in await self?.isStopping ?? true }) { result in await progress(result) }
         forget(Set(report.deleted.map(\.id)))
         return report
+    }
+
+    /// Waits until the simulators and runtimes `report` deleted are gone from the disk, telling `update` the gain in the
+    /// panel's words as it grows; free space measured before that is only a part. Returns at once when there are none.
+    func waitForBackground(_ report: CleanupExecutor.Report, update: @escaping @MainActor @Sendable (String) -> Void) async {
+        guard !report.pending.isEmpty else { return }
+        let background = background, before = report.freeBefore
+        update(BackgroundDeletion.text(.waiting, freeBefore: before, free: report.freeAfter))
+        let task = Task {
+            // Off the main actor: `wait` is nonisolated and only comes back here to update the panel.
+            let result = await background.wait(for: report.pending, free: report.freeAfter) { free in
+                await update(BackgroundDeletion.text(.waiting, freeBefore: before, free: free))
+            }
+            // Only the next run cancels it, and that run's panel is no longer this one's to write.
+            if let result, result.state != .cancelled { update(BackgroundDeletion.text(result.state, freeBefore: before, free: result.free)) }
+        }
+        waiting = task
+        await task.value
     }
 
     /// Stops the run going, whoever started it (a screen, the menu, the loop), after the row being deleted.
@@ -91,6 +115,8 @@ struct CleanupBoard<Header: View>: View {
     @State private var pending: Pending?
     @State private var run: RunProgress?
     @State private var lastReport: CleanupExecutor.Report?
+    /// The gain while simulators and runtimes are still being deleted in the background, and once they are gone.
+    @State private var settleText: String?
     /// Long protected groups start folded: hundreds of rows nobody can tick would bury the ones that matter.
     @State private var unfolded: Set<CleanupStatus> = []
 
@@ -176,7 +202,7 @@ struct CleanupBoard<Header: View>: View {
                 Text(report.refusal ?? "\(deleted.count)개 지움" + (skipped > 0 ? " · \(skipped)개 건너뜀" : ""))
                     .font(.headline)
                 if report.refusal == nil {
-                    Text(report.gainText).font(.callout).foregroundStyle(.secondary)
+                    Text(settleText ?? report.gainText).font(.callout).foregroundStyle(.secondary)
                 }
             }
             Spacer()
@@ -292,6 +318,7 @@ struct CleanupBoard<Header: View>: View {
     private func perform(_ items: [CleanupCandidate]) {
         withAnimation(reduceMotion ? nil : .bouncy(duration: 0.4)) {
             lastReport = nil
+            settleText = nil
             run = RunProgress(steps: items.map(\.runStep))
         }
         Task {
@@ -312,6 +339,12 @@ struct CleanupBoard<Header: View>: View {
                 }
                 run?.outcome = report.refusal ?? report.gainText
                 lastReport = report
+            }
+            await runner.waitForBackground(report) { text in
+                withAnimation(reduceMotion ? nil : .smooth) {
+                    settleText = text
+                    run?.outcome = text
+                }
             }
         }
     }

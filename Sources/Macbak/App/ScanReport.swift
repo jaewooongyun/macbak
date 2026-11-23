@@ -44,7 +44,7 @@ enum ScanReport {
         print("ticked in the dashboard only: \(untrusted.count) · \(untrusted.reduce(0) { $0 + $1.bytes }.diskText)")
 
         print("")
-        for line in lines(Summary(projects: coordinator.rows(in: .projects), jobs: coordinator.rows(in: .jobs),
+        for line in lines(Summary(runtimes: coordinator.rows(in: .runtimes), projects: coordinator.rows(in: .projects), jobs: coordinator.rows(in: .jobs),
                                   discovery: coordinator.discovery, standardCaches: XcodeCacheScanner.standardCaches(FileManager.default.homeDirectoryForCurrentUser).count,
                                   memory: BorrowerMemory.live().load(), lifts: coordinator.lifts.count)) {
             print(line)
@@ -77,11 +77,11 @@ enum ScanReport {
         // clean-up. Computed the way the executor computes its allowed roots.
         let home = FileManager.default.homeDirectoryForCurrentUser
         let allowed = Set((CleanupRoots.all(home: home) + CleanupRoots.ruleRoots(home: home)).compactMap(PathGuard.realPath))
-        // Simulators are deleted with `simctl delete`, which the path guard never sees.
+        // Simulators and runtimes are deleted with `simctl`, which the path guard never sees.
         let unreachable = rows.filter(\.isSelectable).filter { row in
             row.targets.contains { target in
                 switch target.action {
-                case .deleteSimulator: return false
+                case .deleteSimulator, .deleteRuntime: return false
                 case .removeItem, .removeFiles: break
                 }
                 // A granted folder has no root: the executor checks exactly it, below the home.
@@ -109,6 +109,7 @@ enum ScanReport {
 
     /// What the expanded scan found, for the report's summary.
     struct Summary {
+        var runtimes: [CleanupCandidate]
         var projects: [CleanupCandidate]
         var jobs: [CleanupCandidate]
         var discovery: ProjectDiscovery.Result?
@@ -125,6 +126,7 @@ enum ScanReport {
         }
         let projects = summary.projects
         var lines = [
+            count("시뮬레이터 런타임", summary.runtimes),
             count("프로젝트 · Xcode 빌드 캐시", projects.filter { $0.id.hasPrefix("project.derivedData.") }),
             count("프로젝트 · git 이 무시하는 빌드 산출물", projects.filter { $0.id.hasPrefix("project.artifact.") }),
             count("프로젝트 · node_modules", projects.filter { $0.id.hasPrefix("project.nodeModules.") }),

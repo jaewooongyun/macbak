@@ -10,6 +10,8 @@ struct CleanupTarget: Hashable, Sendable {
         case removeFiles([FileStamp])
         /// `xcrun simctl delete`, only while the device is still shut down. `path` is its data folder, for the open-files check.
         case deleteSimulator(udid: String)
+        /// `xcrun simctl runtime delete`, only while every simulator of that OS is shut down. `path` is its disk image.
+        case deleteRuntime(identifier: String)
     }
 
     /// The item to delete, or the folder holding the listed files.

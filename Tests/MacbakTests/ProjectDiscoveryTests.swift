@@ -103,6 +103,7 @@ import Testing
         let inside = home.appending(path: "Library/Developer/Xcode/DerivedData/app-borrower/Build/blob").path
         scanning.context = { _ in Self.context(home, open: open.value ? [inside] : [], memory: memory) }
         scanning.area = { area, context in
+            if area == .runtimes { counts.add("runtimes"); return [] }
             if area == .jobs { counts.add("jobs"); return [] }
             return area == .xcode ? XcodeCacheScanner.scan(context) : []
         }
@@ -115,17 +116,17 @@ import Testing
         return CleanupCoordinator(scanning: scanning)
     }
 
-    @MainActor @Test func theLoopsScanNeverWalksOrReproves() async throws {
+    @MainActor @Test func theLoopsScanNeverWalksListsRuntimesOrReproves() async throws {
         let f = try BrokenCheckoutTests.make()
         defer { f.box.remove() }
         let home = URL(fileURLWithPath: PathGuard.realPath(f.box.root)!)
         let counts = Counts()
         let coordinator = Self.coordinator(home, counts: counts, memory: BorrowerMemory(url: home.appending(path: "support/b.json")))
         await coordinator.scan()
-        #expect(counts.of("walk") == 0 && counts.of("jobs") == 0 && counts.of("reprove") == 0)
+        #expect(counts.of("walk") == 0 && counts.of("runtimes") == 0 && counts.of("jobs") == 0 && counts.of("reprove") == 0)
         #expect(coordinator.projectsScannedAt == nil && coordinator.candidates[.projects] == nil)
         await coordinator.scanProjects()
-        #expect(counts.of("walk") == 1 && counts.of("jobs") == 1 && counts.of("reprove") == 1)
+        #expect(counts.of("walk") == 1 && counts.of("runtimes") == 1 && counts.of("jobs") == 1 && counts.of("reprove") == 1)
         #expect(coordinator.projectsScannedAt != nil && coordinator.scannedAt != nil)
     }
 

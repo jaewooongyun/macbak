@@ -8,12 +8,12 @@ import Observation
 @Observable
 final class CleanupCoordinator {
     enum Area: String, CaseIterable, Sendable {
-        case xcode, appCaches, devices, general, projects, jobs
+        case xcode, appCaches, devices, general, runtimes, projects, jobs
 
         /// What `scan()` reads: the loop, the menu and the dashboard.
         static let regular: [Area] = [.xcode, .appCaches, .devices, .general]
         /// What only `scanProjects()` reads: slow, or outside the usual places.
-        static let expanded: [Area] = [.projects, .jobs]
+        static let expanded: [Area] = [.runtimes, .projects, .jobs]
 
         var title: String {
             switch self {
@@ -21,6 +21,7 @@ final class CleanupCoordinator {
             case .appCaches: "앱 캐시·로그"
             case .devices: "기기 지원·시뮬레이터"
             case .general: "개발 도구·기타 캐시"
+            case .runtimes: "시뮬레이터 런타임"
             case .projects: "프로젝트 안 빌드 캐시"
             case .jobs: "끝난 AI 작업 임시 파일"
             }
@@ -184,15 +185,17 @@ final class CleanupCoordinator {
         }
     }
 
-    /// Finished jobs; and the walk, the build caches it found judged with the usual ones' borrowers, and the usual ones whose
+    /// Runtimes; then the walk, the build caches it found judged with the usual ones' borrowers, and the usual ones whose
     /// package checkouts only a re-proof can clear. Off the main actor in task-group children, as `scanAreas`.
     private func scanExpanded(context: ScanContext) async {
         enum Part: Sendable {
+            case runtimes([CleanupCandidate])
             case jobs([CleanupCandidate])
             case projects([CleanupCandidate], ProjectDiscovery.Result, reproved: [CleanupCandidate])
         }
         let sources = sources
         await withTaskGroup(of: Part.self) { group in
+            group.addTask(priority: .utility) { .runtimes(sources.area(.runtimes, context)) }
             group.addTask(priority: .utility) { .jobs(sources.area(.jobs, context)) }
             group.addTask(priority: .utility) {
                 let discovery = sources.discover(context)
@@ -209,6 +212,9 @@ final class CleanupCoordinator {
             }
             for await part in group {
                 switch part {
+                case .runtimes(let rows):
+                    candidates[.runtimes] = Self.stamped(rows, context)
+                    scanning.remove(.runtimes)
                 case .jobs(let rows):
                     candidates[.jobs] = Self.stamped(rows, context)
                     scanning.remove(.jobs)
@@ -334,6 +340,7 @@ final class CleanupCoordinator {
         case .appCaches: AppCacheScanner.scan(context)
         case .devices: DeveloperDeviceScanner.scan(context)
         case .general: GeneralCacheScanner.scan(context)
+        case .runtimes: RuntimeScanner.scan(context)
         // Made by `scanProjects()` from its walk, which also feeds the borrower map; never scanned on its own.
         case .projects: []
         case .jobs: JobScratchScanner.scan(context)

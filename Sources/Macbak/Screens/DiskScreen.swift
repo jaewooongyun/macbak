@@ -115,7 +115,7 @@ struct DiskScreen: View {
                 .glassAction()
             Button("프로젝트까지 검사", action: scanProjects)
                 .glassAction()
-                .help("홈 폴더의 프로젝트 안 Xcode 캐시까지 찾습니다. 1분 남짓 걸리고, 찾은 항목은 직접 골라야만 지웁니다.")
+                .help("홈 폴더의 프로젝트 안 Xcode 캐시와 시뮬레이터 런타임까지 찾습니다. 1분 남짓 걸리고, 찾은 항목은 직접 골라야만 지웁니다.")
         }
     }
 
@@ -131,7 +131,7 @@ struct DiskScreen: View {
         }
     }
 
-    /// The usual scan first, so the expanded one judges against fresh rows; then the walk and re-proofs.
+    /// The usual scan first, so the expanded one judges against fresh rows; then the walk, runtimes and re-proofs.
     private func scanProjects() {
         system.refreshAll()
         Task {

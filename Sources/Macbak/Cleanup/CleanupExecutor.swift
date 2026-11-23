@@ -69,6 +69,11 @@ actor CleanupExecutor {
         var currentAges: @Sendable () -> CleanupAges = { CleanupAges() }
         /// Alternates files that read package objects from inside this build cache now, read again at the moment asked.
         var liveBorrowers: @Sendable (String) -> [String] = { _ in [] }
+        /// Runtimes and the simulators using them, listed again right before a runtime is deleted.
+        var runtimes: @Sendable () -> SimulatorRuntimes.Listing? = { nil }
+        var deleteRuntime: @Sendable (String) -> Bool = { _ in false }
+        /// `Deleting-*` names in the user temp folder, read before a run and right after each simulator delete.
+        var deletingNames: @Sendable () -> Set<String>? = { nil }
         /// The home a granted folder must sit inside (`PathGuard.checkExact`).
         var home = FileManager.default.homeDirectoryForCurrentUser
         /// The judge of a granted folder: the scan row's, asked again before the delete and before a retry.
@@ -95,7 +100,12 @@ actor CleanupExecutor {
                 audit: .live(),
                 // Settings write every change at once, so the saved values are the current ones.
                 currentAges: { CleanupAges(defaults: .standard) },
-                liveBorrowers: { BorrowerMemory.liveBorrowers(of: $0, memory: .live(), home: home) })
+                liveBorrowers: { BorrowerMemory.liveBorrowers(of: $0, memory: .live(), home: home) },
+                runtimes: { SimulatorRuntimes.read() },
+                deleteRuntime: { identifier in
+                    Command.run("/usr/bin/xcrun", ["simctl", "runtime", "delete", identifier], timeout: .seconds(120))?.status == 0
+                },
+                deletingNames: { BackgroundDeletion.deletingNames() })
         }
     }
 
@@ -136,6 +146,8 @@ actor CleanupExecutor {
         var freeAfter: Int64?
         /// Set when the run could not start at all.
         var refusal: String?
+        /// Deletes `simctl` goes on with after the run, which `BackgroundDeletion` waits for.
+        var pending: [BackgroundDeletion.Pending] = []
 
         var deleted: [ItemResult] { items.filter(\.outcome.succeeded) }
         /// Measured change in free space; nil when either reading failed. Other activity on the Mac shifts it too.
@@ -148,6 +160,10 @@ actor CleanupExecutor {
     private let dependencies: Dependencies
     private var running = false
     private var snapshot: (taken: Date, files: OpenFiles?)?
+    /// `Deleting-*` names before the run, and those already put down to one of its simulator deletes; nil baseline when
+    /// the folder could not be read.
+    private var traces: (baseline: Set<String>?, seen: Set<String>) = (nil, [])
+    private var pending: [BackgroundDeletion.Pending] = []
 
     init(dependencies: Dependencies = .live()) {
         self.dependencies = dependencies
@@ -169,6 +185,7 @@ actor CleanupExecutor {
         defer {
             running = false
             snapshot = nil
+            pending = []
         }
 
         var report = Report()
@@ -178,6 +195,8 @@ actor CleanupExecutor {
             return Report(refusal: "정리 기록을 남길 수 없어 시작하지 않았습니다: \(error.localizedDescription)")
         }
         report.freeBefore = dependencies.freeSpace()
+        let deletesSimulators = candidates.contains { $0.targets.contains { if case .deleteSimulator = $0.action { true } else { false } } }
+        traces = (deletesSimulators ? dependencies.deletingNames() : nil, [])
         let overlapping = Self.overlapping(candidates)
         let mounts = dependencies.mounts()
         let roots = dependencies.allowedRoots()
@@ -202,6 +221,7 @@ actor CleanupExecutor {
             await progress(result)
         }
         report.freeAfter = dependencies.freeSpace()
+        report.pending = pending
         try? dependencies.audit.append(["event": "end", "time": Self.now(), "deleted": "\(report.deleted.count)",
                                         "freeBefore": report.freeBefore.map(String.init) ?? "?", "freeAfter": report.freeAfter.map(String.init) ?? "?"])
         return report
@@ -267,6 +287,8 @@ actor CleanupExecutor {
                 guard let device = dependencies.simulators()?.first(where: { $0.udid == udid }) else { return "시뮬레이터 목록을 읽지 못했습니다" }
                 guard device.state == "Shutdown" else { return "시뮬레이터가 켜져 있습니다" }
                 if open.anyOpen(under: device.dataPath) { return "지금 쓰는 파일이 있습니다" }
+            case .deleteRuntime(let identifier):
+                if let refusal = SimulatorRuntimes.refusal(identifier, in: dependencies.runtimes()) { return refusal }
             case .removeFiles:
                 break
             }
@@ -336,7 +358,17 @@ actor CleanupExecutor {
                 }
                 if let error = await remove(target.path, recheck: check) { firstError = firstError ?? error } else { removed += 1 }
             case .deleteSimulator(let udid):
-                if dependencies.deleteSimulator(udid) { removed += 1 } else { firstError = firstError ?? "simctl delete 실패" }
+                guard dependencies.deleteSimulator(udid) else { firstError = firstError ?? "simctl delete 실패"; break }
+                removed += 1
+                // What appeared right after this delete is its trace; nil when either reading failed.
+                let now = dependencies.deletingNames()
+                let new = traces.baseline.flatMap { baseline in now.map { $0.subtracting(baseline).subtracting(traces.seen) } }
+                traces.seen.formUnion(new ?? [])
+                pending.append(.simulator(udid: udid, dataPath: target.path.path(percentEncoded: false), traces: new))
+            case .deleteRuntime(let identifier):
+                guard dependencies.deleteRuntime(identifier) else { firstError = firstError ?? "simctl runtime delete 실패"; break }
+                removed += 1
+                pending.append(.runtime(identifier: identifier, path: target.path.path(percentEncoded: false)))
             case .removeFiles(let files):
                 for file in files {
                     let url = URL(fileURLWithPath: file.path)
