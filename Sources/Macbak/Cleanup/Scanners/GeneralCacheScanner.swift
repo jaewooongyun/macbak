@@ -26,8 +26,6 @@ enum GeneralCacheScanner {
     ]
     /// Folders the tool says must be cleaned with its own command, never by deleting files.
     static let commandOnly = [".cache/uv"]
-    /// The user's rule: anything changed within three days is being worked on.
-    static let protectedFor: TimeInterval = 3 * 86_400
 
     struct Found {
         let relative: String
@@ -88,7 +86,8 @@ enum GeneralCacheScanner {
         if tier != .keep && tier != .model && facts.isComplete && facts.bytes < ScanSupport.minimumBytes { return nil }
         var evidence = Evidence(verified: facts.isComplete && facts.newest != nil ? true : nil,
                                 inUse: ScanSupport.isOpen(context, [item.url]), regenerable: true)
-        if let idle = facts.idle(at: context.now), idle < protectedFor { evidence.recentlyUsed = true }
+        // The user's rule (Settings, three days by default): anything changed within it is being worked on.
+        if let idle = facts.idle(at: context.now), idle < context.ages.seconds(.general) { evidence.recentlyUsed = true }
         switch tier {
         case .precheck: break
         case .offer:

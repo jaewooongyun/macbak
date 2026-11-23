@@ -69,16 +69,19 @@ struct MacbakApp: App {
     @State private var cleanup: CleanupCoordinator
     @State private var runner: CleanupRunner
     @State private var menuBar = MenuBarSettings()
+    @State private var cleanupSettings: CleanupSettings
     @State private var navigation: AppNavigation
     @State private var updater = AppUpdater(bundle: .main)
 
     init() {
         // Started here, not in a view, so monitoring and the loop keep running with the window closed.
         // The menu bar panel shows the app list and AI use too, so it counts as a window here.
+        // One set of clean-up ages for every scan, the executor (through the saved values) and the scheduled loop.
+        let cleanupSettings = CleanupSettings()
         let system = SystemMonitor(isWindowShown: { MainWindow.isOnScreen || MenuBarPanel.isOpen })
         let ai = AIMonitor(isWindowShown: { MainWindow.isOnScreen || MenuBarPanel.isOpen })
-        let cleanup = CleanupCoordinator()
-        let storage = AIStorage()
+        let cleanup = CleanupCoordinator(settings: cleanupSettings)
+        let storage = AIStorage(settings: cleanupSettings)
         // Both clean-up screens and the loop hand rows to one runner, which checks each against these lists again
         // before deleting, and never overlaps a disk scan. The AI storage scan (most of a minute) is not waited for; it
         // starts no new reading while a run deletes, and drops what was deleted meanwhile when its report lands.
@@ -109,6 +112,7 @@ struct MacbakApp: App {
         _loop = State(initialValue: loop)
         _ai = State(initialValue: ai)
         _cleanup = State(initialValue: cleanup)
+        _cleanupSettings = State(initialValue: cleanupSettings)
         _aiStorage = State(initialValue: storage)
         _runner = State(initialValue: runner)
         // For measurements: `MACBAK_OPEN_SCREEN=disk` opens the main window on that screen, as the menu bar's link does.
@@ -162,6 +166,7 @@ struct MacbakApp: App {
                 .environment(system)
                 .environment(menuBar)
                 .environment(updater)
+                .environment(cleanupSettings)
         }
     }
 }

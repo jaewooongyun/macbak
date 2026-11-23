@@ -82,6 +82,8 @@ struct CleanupCandidate: Identifiable, Sendable {
     /// 3-day rule). Ready rows with it make the shallow clean-up: the menu bar's button and the scheduled loop.
     /// - Important: Set by the scanner that makes the row, never by the on-device model.
     var trusted = false
+    /// The clean-up ages the scan judged it by. The executor refuses it once Settings hold other ages.
+    var ages = CleanupAges()
 
     var verdict: Verdict { evaluate(evidence) }
 
@@ -93,6 +95,7 @@ struct CleanupCandidate: Identifiable, Sendable {
         row.toolCommand = toolCommand
         row.exploreInput = exploreInput
         row.trusted = trusted
+        row.ages = ages
         return row
     }
 }

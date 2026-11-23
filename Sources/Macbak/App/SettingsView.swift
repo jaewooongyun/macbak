@@ -1,6 +1,20 @@
 import SwiftUI
 
 struct SettingsView: View {
+    var body: some View {
+        TabView {
+            GeneralSettingsView()
+                .tabItem { Label("일반", systemImage: "gearshape") }
+            CleanupAgesView()
+                .tabItem { Label("정리 기준", systemImage: "clock.arrow.circlepath") }
+        }
+        .frame(width: 460)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// The menu bar item and updates.
+struct GeneralSettingsView: View {
     @Environment(MenuBarSettings.self) private var settings
     @Environment(AppUpdater.self) private var updater
 
@@ -71,8 +85,37 @@ struct SettingsView: View {
             .disabled(updater.disabledReason != nil)
         }
         .formStyle(.grouped)
-        .frame(width: 460)
-        .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// How long each kind of item waits before a clean-up may take it.
+struct CleanupAgesView: View {
+    @Environment(CleanupSettings.self) private var settings
+
+    var body: some View {
+        Form {
+            Section {
+                ForEach(CleanupAges.Item.allCases, id: \.self) { item in
+                    Picker(item.title, selection: Binding(get: { settings.ages[item] }, set: { settings.set(item, $0) })) {
+                        ForEach(item.choices, id: \.self) { value in
+                            Text("\(value)\(item.unit)").tag(value)
+                        }
+                    }
+                }
+            } header: {
+                Text("이만큼 쓰지 않은 것만 정리합니다")
+            } footer: {
+                Text("짧게 고르면 정기 정리와 즉시 정리가 자동으로 지우는 범위도 넓어집니다. 열려 있는 파일과 실행 중인 앱은 기간과 상관없이 지키며, 값을 바꾸면 지금까지의 검사 결과는 다시 검사해야 합니다.")
+                    .multilineTextAlignment(.leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            Section {
+                Button("기본값으로") { settings.resetToDefaults() }
+                    .disabled(settings.ages == CleanupAges())
+            }
+        }
+        .formStyle(.grouped)
     }
 }
 

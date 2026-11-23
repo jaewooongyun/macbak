@@ -1,14 +1,11 @@
 import Foundation
 
 /// App caches in `~/Library/Caches` (one row per app, its contents offered, the folder kept) and old logs in
-/// `~/Library/Logs` (one row, only files untouched for 30 days).
+/// `~/Library/Logs` (one row, only files untouched for the log age, 30 days by default).
 /// - Important: Folders another scanner owns (AI tools, xcode-build-server) are left out here so nothing is offered twice.
 ///   The cache rules run on every row: their "keep" protects it whatever else is true, and their "offer" makes it a
 ///   choice. Their "don't know" changes nothing here, because the user's three-day rule already covers Library/Caches.
 enum AppCacheScanner {
-    /// The user's rule: a cache untouched for three days goes; it is rebuilt when next needed.
-    static let protectedFor: TimeInterval = 3 * 86_400
-    static let logAge: TimeInterval = 30 * 86_400
 
     /// Never offered here: xcode-build-server belongs to the Xcode row.
     /// - Note: The SwiftPM cache used to be kept; the user moved it to "a choice" on 2026-11-03, which the rules say.
@@ -54,7 +51,8 @@ enum AppCacheScanner {
             let folded = PathKey.fold(name)
             var evidence = Evidence(verified: complete && facts.newest != nil ? true : nil, inUse: ScanSupport.isOpen(context, [item]), regenerable: true)
             if context.runningBundleIDs.contains(where: { PathKey.fold($0) == folded }) { evidence.inUse = true }
-            if let idle = facts.idle(at: context.now), idle < protectedFor { evidence.recentlyUsed = true }
+            // The user's rule (Settings, three days by default): a cache untouched that long goes; it is rebuilt when next needed.
+            if let idle = facts.idle(at: context.now), idle < context.ages.seconds(.appCache) { evidence.recentlyUsed = true }
             if downloadCaches.contains(folded) { evidence.downloadCost = true }
             let installed = context.installedBundleIDs.contains(name)
 
@@ -94,11 +92,11 @@ enum AppCacheScanner {
         return candidates
     }
 
-    /// One row for every log file untouched for 30 days. A folder that cannot be read in full is left out entirely, and
-    /// files a process has open are skipped, so each listed file stands on its own evidence.
+    /// One row for every log file untouched for the log age (Settings, 30 days by default). A folder that cannot be read
+    /// in full is left out entirely, and files a process has open are skipped, so each listed file stands on its own evidence.
     private static func oldLogs(_ context: ScanContext) -> CleanupCandidate? {
         guard let root = ScanSupport.resolved(context.home, "Library/Logs"), let items = ScanSupport.children(of: root) else { return nil }
-        let cutoff = context.now.addingTimeInterval(-logAge)
+        let cutoff = context.now.addingTimeInterval(-context.ages.seconds(.logs))
         var targets: [CleanupTarget] = []
         var skipped = 0
         var bytes: Int64 = 0
@@ -118,10 +116,10 @@ enum AppCacheScanner {
             if case .removeFiles(let files) = target.action { return total + files.count }
             return total
         }
-        var detail = "~/Library/Logs · 30일 넘은 파일 \(count)개"
+        var detail = "~/Library/Logs · \(context.ages.logs)일 넘은 파일 \(count)개"
         if skipped > 0 { detail += " · 읽지 못했거나 지킬 파일이 있는 폴더 \(skipped)개는 뺌" }
         let evidence = Evidence(verified: true, inUse: context.openFiles == nil ? nil : false, regenerable: true)
-        var row = CleanupCandidate(id: "logs.old", name: "30일 넘은 로그", detail: detail, symbol: "doc.text", bytes: bytes,
+        var row = CleanupCandidate(id: "logs.old", name: "\(context.ages.logs)일 넘은 로그", detail: detail, symbol: "doc.text", bytes: bytes,
                                    evidence: evidence, targets: targets, lastUsed: cutoff)
         row.trusted = true
         return row

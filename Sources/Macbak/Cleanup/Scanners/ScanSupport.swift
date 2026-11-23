@@ -10,6 +10,8 @@ struct ScanContext: Sendable {
     let runningBundleIDs: Set<String>
     /// Bundle ids, among the cache folder names, that LaunchServices knows an installed app for.
     let installedBundleIDs: Set<String>
+    /// The ages picked in Settings when the scan started; the whole scan judges by them.
+    var ages = CleanupAges()
 }
 
 enum ScanSupport {

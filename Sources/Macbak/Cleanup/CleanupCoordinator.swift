@@ -20,10 +20,21 @@ final class CleanupCoordinator {
         }
     }
 
+    /// What a scan reads; tests replace it to hold a scan open or to count what it calls.
+    struct Scanning: Sendable {
+        var area: @Sendable (Area, ScanContext) -> [CleanupCandidate] = { CleanupCoordinator.scan($0, $1) }
+        var context: @MainActor @Sendable (CleanupAges) async -> ScanContext = { await CleanupCoordinator.liveContext(ages: $0) }
+    }
+
     private(set) var candidates: [Area: [CleanupCandidate]] = [:]
     private(set) var scanning: Set<Area> = []
     private(set) var scannedAt: Date?
+    /// The ages the latest finished scan judged by.
+    private(set) var scannedAges: CleanupAges?
     private(set) var generation = 0
+    /// The ages picked in Settings; nil keeps the defaults.
+    let settings: CleanupSettings?
+    @ObservationIgnored private let sources: Scanning
     /// Snapshots and tests fill the candidates themselves and must never scan the real disk.
     private let scansDisk: Bool
     /// The scan in progress, which later callers wait for.
@@ -34,9 +45,11 @@ final class CleanupCoordinator {
     /// was handed; together with the runner waiting for a scan in progress, scans and runs never overlap.
     @ObservationIgnored var isDeleting: @MainActor () -> Bool = { false }
 
-    init() {
+    init(settings: CleanupSettings? = nil, scanning: Scanning = Scanning()) {
         scansDisk = true
         explorer = CacheExplorer()
+        self.settings = settings
+        sources = scanning
     }
 
     init(fixture: [Area: [CleanupCandidate]], explorer: CacheExplorer = CacheExplorer()) {
@@ -44,10 +57,16 @@ final class CleanupCoordinator {
         scannedAt = .now
         scansDisk = false
         self.explorer = explorer
+        settings = nil
+        sources = Scanning()
     }
 
+    var ages: CleanupAges { settings?.ages ?? CleanupAges() }
     var all: [CleanupCandidate] { Area.allCases.flatMap { candidates[$0] ?? [] } }
-    var isStale: Bool { scansDisk && (scannedAt.map { Date.now.timeIntervalSince($0) > CleanupCandidate.resultLifetime } ?? true) }
+    /// No scan yet, the last one is older than the result lifetime, or it judged by ages Settings no longer hold.
+    var isStale: Bool {
+        scansDisk && (scannedAt.map { Date.now.timeIntervalSince($0) > CleanupCandidate.resultLifetime } ?? true || scannedAges != ages)
+    }
 
     /// Scans every area. A call while a scan runs waits for that scan rather than returning at once, so the caller
     /// never reads half-filled results.
@@ -69,24 +88,43 @@ final class CleanupCoordinator {
     private func scanAll() async {
         explorer.cancel()
         scanning = Set(Area.allCases)
-        let context = await makeContext()
-        await withTaskGroup(of: (Area, [CleanupCandidate]).self) { group in
-            for area in Area.allCases {
-                group.addTask(priority: .utility) { (area, Self.scan(area, context)) }
-            }
-            for await (area, found) in group {
-                candidates[area] = found.map { row in
-                    var row = row
-                    row.scannedAt = context.now
-                    return row
-                }.sorted(by: Self.oldestFirst)
-                scanning.remove(area)
-            }
+        let context = await sources.context(ages)
+        await scanAreas(Area.allCases, context: context)
+        generation += 1
+        // Settings changed while it read: its rows were judged by other ages, so the result stays stale and the
+        // executor refuses its rows. A later scan, not this one, makes it current.
+        guard context.ages == ages else {
+            scannedAt = nil
+            scannedAges = nil
+            return
         }
         // The start, as on each row: the panel's "too old" and the executor's must agree.
         scannedAt = context.now
-        generation += 1
+        scannedAges = context.ages
         startExploring()
+    }
+
+    /// Fills `areas` with what they hold now, each row stamped with the scan's start and ages.
+    private func scanAreas(_ areas: [Area], context: ScanContext) async {
+        let scan = sources.area
+        await withTaskGroup(of: (Area, [CleanupCandidate]).self) { group in
+            for area in areas {
+                group.addTask(priority: .utility) { (area, scan(area, context)) }
+            }
+            for await (area, found) in group {
+                candidates[area] = Self.stamped(found, context)
+                scanning.remove(area)
+            }
+        }
+    }
+
+    nonisolated static func stamped(_ rows: [CleanupCandidate], _ context: ScanContext) -> [CleanupCandidate] {
+        rows.map { row in
+            var row = row
+            row.scannedAt = context.now
+            row.ages = context.ages
+            return row
+        }.sorted(by: oldestFirst)
     }
 
     /// Hands the rows the rules could not tell to the on-device model, in this scan's generation.
@@ -166,7 +204,7 @@ final class CleanupCoordinator {
         for area in Area.allCases { candidates[area]?.removeAll { ids.contains($0.id) } }
     }
 
-    nonisolated private static func scan(_ area: Area, _ context: ScanContext) -> [CleanupCandidate] {
+    nonisolated static func scan(_ area: Area, _ context: ScanContext) -> [CleanupCandidate] {
         switch area {
         case .xcode: XcodeCacheScanner.scan(context)
         case .appCaches: AppCacheScanner.scan(context)
@@ -184,12 +222,12 @@ final class CleanupCoordinator {
         }
     }
 
-    private func makeContext() async -> ScanContext {
+    static func liveContext(ages: CleanupAges) async -> ScanContext {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let running = Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier))
         let names = (try? FileManager.default.contentsOfDirectory(atPath: home.appending(path: "Library/Caches").path(percentEncoded: false))) ?? []
         let installed = Set(names.filter { $0.contains(".") && NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0) != nil })
         let openFiles = await Task.detached(priority: .utility) { OpenFiles.capture() }.value
-        return ScanContext(home: home, now: .now, openFiles: openFiles, runningBundleIDs: running, installedBundleIDs: installed)
+        return ScanContext(home: home, now: .now, openFiles: openFiles, runningBundleIDs: running, installedBundleIDs: installed, ages: ages)
     }
 }

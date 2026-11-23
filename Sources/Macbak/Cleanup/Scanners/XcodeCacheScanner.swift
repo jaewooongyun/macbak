@@ -12,10 +12,6 @@ enum XcodeCacheScanner {
     static let sharedNames: Set<String> = [
         "CompilationCache.noindex", "SymbolCache.noindex", "SDKStatCaches.noindex", "SDKExplicitPrecompiledModules", "ModuleCache.noindex",
     ]
-    /// The person's rule for build caches (2026-11-04, was three days): one touched within a day is being worked on; one
-    /// untouched longer goes, since the next build makes it again. Open files and a running Xcode still protect it.
-    static let protectedFor: TimeInterval = 86_400
-
     private struct Member {
         let target: CleanupTarget
         let facts: TreeFacts
@@ -79,7 +75,9 @@ enum XcodeCacheScanner {
         var watched = group.map(\.target.path)
         if let workspace, exists == true { watched.append(URL(fileURLWithPath: workspace).deletingLastPathComponent()) }
         var evidence = Evidence(verified: complete && idle != nil ? true : nil, inUse: ScanSupport.isOpen(context, watched), regenerable: true)
-        if let idle, idle < protectedFor { evidence.recentlyUsed = true }
+        // The person's rule for build caches (Settings, one day by default): one touched within it is being worked on; one
+        // untouched longer goes, since the next build makes it again. Open files and a running Xcode still protect it.
+        if let idle, idle < context.ages.seconds(.buildCache) { evidence.recentlyUsed = true }
         // Test results and their attachments: a rebuild does not bring the same run back, so a person chooses.
         if group.contains(where: { $0.label == "MCP result-bundles" }) { evidence.userData = true }
         if let alarm = group.lazy.compactMap(\.facts.alarm).first { evidence.protectedReason = CacheRules.alarmReason(alarm) }
@@ -107,14 +105,14 @@ enum XcodeCacheScanner {
         return row
     }
 
-    /// The shared compiler caches: kept while Xcode runs, anything in them is open, or they changed within three days.
+    /// The shared compiler caches: kept while Xcode runs, anything in them is open, or they changed within the build-cache age.
     private static func sharedCandidate(_ group: [Member], context: ScanContext) -> CleanupCandidate {
         let complete = group.allSatisfy(\.facts.isComplete)
         let newest = group.compactMap(\.facts.newest).max()
         var inUse = ScanSupport.isOpen(context, group.map(\.target.path))
         if context.runningBundleIDs.contains("com.apple.dt.Xcode") { inUse = true }
         var evidence = Evidence(verified: complete && newest != nil ? true : nil, inUse: inUse, regenerable: true)
-        if let newest, context.now.timeIntervalSince(newest) < protectedFor { evidence.recentlyUsed = true }
+        if let newest, context.now.timeIntervalSince(newest) < context.ages.seconds(.buildCache) { evidence.recentlyUsed = true }
         if let alarm = group.lazy.compactMap(\.facts.alarm).first { evidence.protectedReason = CacheRules.alarmReason(alarm) }
         var row = CleanupCandidate(id: "xcode.shared", name: "Xcode 공용 컴파일 캐시", detail: "모든 프로젝트가 함께 씀 · \(group.count)개 폴더 · \(ScanSupport.ago(newest, now: context.now))",
                                    symbol: "hammer.circle", bytes: group.reduce(0) { $0 + $1.facts.bytes }, evidence: evidence,

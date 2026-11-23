@@ -4,13 +4,6 @@ import Foundation
 /// minutes to copy again, and a simulator's apps, logins and test state go with it. Long-unused device support joins the
 /// shallow clean-up (the person's decision, 2026-11-04); a simulator never does, see `simulators(_:_:)`.
 enum DeveloperDeviceScanner {
-    /// Device symbols changed within this are being used.
-    static let recentFor: TimeInterval = 3 * 86_400
-    /// Device symbols untouched this long are copied again only if that device comes back: shallow.
-    static let supportShallowAfter: TimeInterval = 14 * 86_400
-    /// A simulator neither booted nor changed this long starts ticked on the dashboard.
-    static let simulatorQuietAfter: TimeInterval = 5 * 86_400
-
     static func scan(_ context: ScanContext) -> [CleanupCandidate] {
         deviceSupport(context) + simulators(context)
     }
@@ -27,8 +20,10 @@ enum DeveloperDeviceScanner {
                                         inUse: ScanSupport.isOpen(context, [item]), regenerable: true)
                 if let alarm = facts.alarm { evidence.protectedReason = CacheRules.alarmReason(alarm) }
                 let quiet = facts.idle(at: context.now)
-                if let quiet, quiet < recentFor { evidence.recentlyUsed = true }
-                let shallow = quiet.map { $0 >= supportShallowAfter } ?? false
+                // Changed within the protection age (Settings): being used. Untouched past the automatic age: copied again
+                // only if that device comes back, so shallow.
+                if let quiet, quiet < context.ages.seconds(.deviceSupportProtect) { evidence.recentlyUsed = true }
+                let shallow = quiet.map { $0 >= context.ages.seconds(.deviceSupportShallow) } ?? false
                 if !shallow { evidence.slowToRebuild = true }
                 var row = CleanupCandidate(
                     id: "devicesupport." + PathKey.fold(item.path(percentEncoded: false)), name: "\(platform) \(item.lastPathComponent) 기기 지원 파일",
@@ -48,7 +43,7 @@ enum DeveloperDeviceScanner {
         return simulators(devices, context)
     }
 
-    /// One row per simulator. A shut-down one last booted over `simulatorQuietAfter` ago starts ticked on the dashboard
+    /// One row per simulator. A shut-down one last booted longer ago than the simulator age (Settings) starts ticked on the dashboard
     /// only if its data folder is as quiet: a `simctl clone` can keep using the original's folder while the original is
     /// never booted. A walk that does not finish leaves it a choice.
     /// - Important: Never shallow. A clone keeps its apps and data in the original's folder, and which simulator is whose
@@ -58,7 +53,7 @@ enum DeveloperDeviceScanner {
         let root = URL(fileURLWithPath: context.home.appending(path: "Library/Developer/CoreSimulator/Devices").path(percentEncoded: false))
         let idle = devices.filter { device in
             device.state == "Shutdown" && device.dataBytes >= ScanSupport.minimumBytes
-                && (device.lastUsed.map { context.now.timeIntervalSince($0) >= simulatorQuietAfter } ?? false)
+                && (device.lastUsed.map { context.now.timeIntervalSince($0) >= context.ages.seconds(.simulatorQuiet) } ?? false)
         }
         let walks = Dictionary(zip(idle.map(\.udid), TreeWalk.inspectAll(idle.map { URL(fileURLWithPath: $0.dataPath) }, budget: .seconds(60))),
                                uniquingKeysWith: { first, _ in first })
@@ -66,7 +61,7 @@ enum DeveloperDeviceScanner {
             guard device.dataBytes >= ScanSupport.minimumBytes else { return nil }
             let data = URL(fileURLWithPath: device.dataPath)
             var evidence = Evidence(verified: true, inUse: device.state == "Shutdown" ? ScanSupport.isOpen(context, [data]) : true, regenerable: true)
-            let quiet = walks[device.udid].flatMap { $0.idle(at: context.now) }.map { $0 >= simulatorQuietAfter } ?? false
+            let quiet = walks[device.udid].flatMap { $0.idle(at: context.now) }.map { $0 >= context.ages.seconds(.simulatorQuiet) } ?? false
             // Long unused and unchanged: ticked on the dashboard; otherwise its state is a choice.
             evidence.userData = !quiet
             return CleanupCandidate(

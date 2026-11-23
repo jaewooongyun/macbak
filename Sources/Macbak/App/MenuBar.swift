@@ -256,7 +256,14 @@ struct MenuBarPanel: View {
             }
             .controlSize(.large)
         }
-        .help("3일 넘게 안 쓴 앱 캐시 중 규칙이 알아보는 것(앱·컨테이너·Chromium 앱), 1일 넘게 안 쓴 Xcode 빌드 캐시, 14일 넘게 안 쓴 기기 지원 파일, 30일 넘은 로그, AI 도구가 다시 만드는 캐시, 내려받지 않고 다시 만드는 개발 도구 캐시. 시뮬레이터는 넣지 않습니다. 정기 정리도 같은 것만 지웁니다.")
+        .help(Self.shallowHelp(coordinator.ages))
+    }
+
+    /// What the immediate clean-up takes, in the ages picked in Settings.
+    static func shallowHelp(_ ages: CleanupAges) -> String {
+        "\(ages.appCache)일 넘게 안 쓴 앱 캐시 중 규칙이 알아보는 것(앱·컨테이너·Chromium 앱), \(ages.buildCache)일 넘게 안 쓴 Xcode 빌드 캐시, "
+            + "\(ages.deviceSupportShallow)일 넘게 안 쓴 기기 지원 파일, \(ages.logs)일 넘은 로그, AI 도구가 다시 만드는 캐시, "
+            + "내려받지 않고 다시 만드는 개발 도구 캐시. 시뮬레이터는 넣지 않습니다. 정기 정리도 같은 것만 지웁니다. 기간은 설정의 '정리 기준'에서 바꿉니다."
     }
 
     /// What only the dashboard offers — rows that need a choice or that no curated source vouches for — and what the

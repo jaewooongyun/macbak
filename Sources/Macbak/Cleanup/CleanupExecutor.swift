@@ -65,6 +65,8 @@ actor CleanupExecutor {
         /// Seconds after its scan a row may still be deleted.
         var resultLifetime: TimeInterval = CleanupCandidate.resultLifetime
         var retryDelay: Duration = .milliseconds(500)
+        /// The clean-up ages Settings hold now; a row judged by other ages is refused, before every target and retry too.
+        var currentAges: @Sendable () -> CleanupAges = { CleanupAges() }
 
         static func live() -> Dependencies {
             let home = FileManager.default.homeDirectoryForCurrentUser
@@ -84,7 +86,9 @@ actor CleanupExecutor {
                     let sample = AIProcessSampler.sample(previous: [:], previousTime: 0)
                     return sample.complete ? sample.running : nil
                 },
-                audit: .live())
+                audit: .live(),
+                // Settings write every change at once, so the saved values are the current ones.
+                currentAges: { CleanupAges(defaults: .standard) })
         }
     }
 
@@ -232,6 +236,7 @@ actor CleanupExecutor {
         if shallow, !(current.map { $0.isShallow && $0.targets == candidate.targets } ?? false) { return "다시 검사한 결과 얕은 정리 대상이 아닙니다" }
         if let current, !current.isSelectable { return "다시 검사한 결과 지금은 고를 수 없습니다" }
         if candidate.scannedAt.map({ Date.now.timeIntervalSince($0) > dependencies.resultLifetime }) ?? true { return "검사한 지 오래돼 다시 검사해야 합니다" }
+        if agesChanged(candidate) { return Self.agesRefusal }
         if overlapping.contains(candidate.id) { return "다른 항목과 경로가 겹칩니다" }
         guard let open = openFiles() else { return "열린 파일을 확인하지 못했습니다" }
         if let refusal = await ownerRefusal(candidate, open: open) { return refusal }
@@ -267,6 +272,7 @@ actor CleanupExecutor {
         }
         var removed = 0, firstError: String?
         for (index, target) in candidate.targets.enumerated() {
+            if agesChanged(candidate) { firstError = firstError ?? Self.agesRefusal; break }
             let isFolder = if case .removeItem = target.action { true } else { false }
             // Apps and the workspace are asked again before every further target; an AI tool sample costs too much to repeat.
             // A folder asks them below instead, after its walk.
@@ -296,18 +302,22 @@ actor CleanupExecutor {
                     firstError = firstError ?? Self.describe(refusal)
                     break
                 }
+                // Settings changed during the slow checks leave the row judged by old ages.
+                if agesChanged(candidate) { firstError = firstError ?? Self.agesRefusal; break }
             }
             switch target.action {
             case .removeItem:
                 // And again before a retry, in the same order: the slow questions first (the walk, which apps and tools
                 // run, which can wait on the main actor), then open files from a snapshot aged at that moment, and the guard.
                 let check = { () async -> Bool in
+                    if self.agesChanged(candidate) { return false }
                     if shallow, Self.deepRefusal(target.path) != nil { return false }
                     guard let before = self.openFiles(fresh: true), await self.ownerRefusal(candidate, open: before) == nil,
                           let open = self.openFiles(), !open.anyOpen(under: target.path.path(percentEncoded: false)),
                           !Self.workspaceOpen(candidate, open) else { return false }
                     return PathGuard.check(target.path, inside: target.root, identity: target.identity, allowedRoots: roots,
                                            forbidden: self.dependencies.forbidden, mounts: mounts) == nil
+                        && !self.agesChanged(candidate)
                 }
                 if let error = await remove(target.path, recheck: check) { firstError = firstError ?? error } else { removed += 1 }
             case .deleteSimulator(let udid):
@@ -321,7 +331,8 @@ actor CleanupExecutor {
                           (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate == file.modified
                     else { continue }
                     let check = { () async -> Bool in
-                        guard let before = self.openFiles(fresh: true), await self.ownerRefusal(candidate, open: before) == nil,
+                        guard !self.agesChanged(candidate), let before = self.openFiles(fresh: true),
+                              await self.ownerRefusal(candidate, open: before) == nil,
                               let open = self.openFiles(), !open.anyOpen(under: file.path), !Self.workspaceOpen(candidate, open) else { return false }
                         return PathGuard.check(url, inside: target.root, identity: file.identity, allowedRoots: roots,
                                                forbidden: self.dependencies.forbidden, mounts: mounts) == nil
@@ -354,6 +365,11 @@ actor CleanupExecutor {
         }
         return nil
     }
+
+    static let agesRefusal = "정리 기준이 바뀌어 다시 검사해야 합니다"
+
+    /// Whether Settings now hold other clean-up ages than the scan judged the row by.
+    private func agesChanged(_ candidate: CleanupCandidate) -> Bool { candidate.ages != dependencies.currentAges() }
 
     /// Whether a file is open in one of the row's watched folders (its workspace's own folder).
     private static func workspaceOpen(_ candidate: CleanupCandidate, _ open: OpenFiles) -> Bool {

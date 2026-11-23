@@ -5,10 +5,12 @@ import Foundation
 @MainActor
 enum ScanReport {
     static func run() {
-        let coordinator = CleanupCoordinator()
+        // The ages picked in Settings, read only.
+        let settings = CleanupSettings()
+        let coordinator = CleanupCoordinator(settings: settings)
         // AI tool caches too, the way the app scans them: AI processes first, so unused caches can be told.
         let ai = AIMonitor(isWindowShown: { true })
-        let storage = AIStorage()
+        let storage = AIStorage(settings: settings)
         let started = Date.now
         var finished = false
         Task {

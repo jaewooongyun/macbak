@@ -386,7 +386,7 @@ func aCancelledWaitingScanGivesUp() async {
     let storage = AIStorage()
     let gate = DispatchSemaphore(value: 0)
     let rows = ["a", "b"].map { CleanupCandidate(id: $0, name: $0, detail: "", symbol: "doc", bytes: 1, evidence: Evidence(verified: true, inUse: false, regenerable: true), targets: []) }
-    storage.read = { _ in
+    storage.read = { _, _ in
         gate.wait()
         return AIStorageReport(totals: [], candidates: rows, scannedAt: .now, duration: 0)
     }
