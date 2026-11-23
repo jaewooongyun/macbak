@@ -17,6 +17,16 @@ enum Theme {
     /// - Important: Longer, staggered animations kept something moving most of the time; each animated frame is a
     ///   SwiftUI commit on the main thread, which took the glance screen from 6% to over 20% of a core.
     static let liveChange = Animation.smooth(duration: 0.22)
+    /// A state that changes because the person did something or a job finished: a screen switch, a row appearing.
+    static let stateChange = Animation.smooth(duration: 0.25)
+    /// Layout that reshapes as the window or the content grows: tiles reflowing, a section opening.
+    static let morph = Animation.spring(duration: 0.35, bounce: 0.15)
+    /// The sidebar selection drop moves its leading edge first and lets the trailing edge catch up, so it stretches
+    /// toward the new row and settles. `smooth` is a spring with no bounce, so neither edge overshoots.
+    static let dropLead = Animation.smooth(duration: 0.25)
+    static let dropTrail = Animation.smooth(duration: 0.35)
+    /// A pressed tile or row sinks quickly and comes back the same way.
+    static let press = Animation.easeOut(duration: 0.12)
 
     /// Big numbers: rounded, like the system's own gauges.
     static func numeral(_ size: CGFloat) -> Font { .system(size: size, weight: .semibold, design: .rounded) }

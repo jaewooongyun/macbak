@@ -12,12 +12,12 @@ struct CardBackground: View {
     var body: some View {
         Theme.cardShape
             .fill(scheme == .light ? Color(nsColor: .textBackgroundColor) : Color.white.opacity(highlighted ? 0.1 : 0.065))
+            // The hover step in light mode: white has no lighter shade, so the surface dims a touch instead.
+            .overlay { if scheme == .light && highlighted { Theme.cardShape.fill(Color.black.opacity(0.035)) } }
             .overlay {
                 Theme.cardShape.strokeBorder(contrast == .increased ? Color(nsColor: .separatorColor) : Color.primary.opacity(scheme == .light ? 0.07 : 0.09),
                                              lineWidth: contrast == .increased ? 1 : 0.5)
             }
-            // Only under the pointer: a resting shadow is a blur re-rendered on the CPU whenever anything in the card moves.
-            .shadow(color: .black.opacity(scheme == .light && highlighted ? 0.1 : 0), radius: highlighted ? 10 : 0, y: highlighted ? 4 : 0)
     }
 }
 
@@ -69,34 +69,22 @@ private struct TileStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View { TileSurface(configuration: configuration) }
 }
 
-/// Liquid response: under the pointer the card swells a little and light runs along its rim, like the edge of glass;
-/// a press squeezes it and lets it spring back.
+/// Under the pointer the card's surface steps up one shade; a press sinks it a little.
 private struct TileSurface: View {
     let configuration: ButtonStyleConfiguration
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.colorScheme) private var scheme
     @State private var hovering = false
 
     var body: some View {
         configuration.label
             .foregroundStyle(.primary)
             .background(CardBackground(highlighted: hovering))
-            .overlay {
-                if hovering {
-                    Theme.cardShape
-                        .strokeBorder(LinearGradient(colors: [rim.opacity(scheme == .dark ? 0.45 : 0.14), rim.opacity(0)],
-                                                     startPoint: .topLeading, endPoint: .center), lineWidth: 1)
-                        .transition(.opacity)
-                }
-            }
-            .scaleEffect(reduceMotion ? 1 : configuration.isPressed ? 0.97 : hovering ? 1.012 : 1)
-            .animation(.bouncy(duration: 0.3, extraBounce: 0.15), value: configuration.isPressed)
-            .animation(.smooth(duration: 0.18), value: hovering)
+            .scaleEffect(reduceMotion ? 1 : configuration.isPressed ? 0.98 : 1)
+            .animation(Theme.press, value: configuration.isPressed)
+            .animation(Theme.stateChange, value: hovering)
             .onHover { hovering = $0 }
     }
-
-    private var rim: Color { scheme == .dark ? .white : .black }
 }
 
 struct CardHeader<Trailing: View>: View {
@@ -128,14 +116,12 @@ extension CardHeader where Trailing == EmptyView {
     }
 }
 
-/// The trailing mark of a tile: a chevron in a small glass bubble.
+/// The trailing mark of a tile: a quiet chevron saying the tile opens a screen. No bubble: the tile itself is the button.
 struct OpenHint: View {
     var body: some View {
         Image(systemName: "chevron.right")
-            .font(.caption.weight(.bold))
-            .foregroundStyle(.secondary)
-            .frame(width: 22, height: 22)
-            .floatingGlass(in: Circle())
+            .font(.footnote.weight(.semibold))
+            .foregroundStyle(.tertiary)
             .accessibilityHidden(true)
     }
 }
@@ -250,7 +236,7 @@ struct LiquidGrid<Content: View>: View {
         grid { content }
             .onGeometryChange(for: Int.self) { grid.fittingColumns(width: $0.size.width) } action: { fitting in
                 guard fitting != columns else { return }
-                withAnimation(columns == nil || reduceMotion ? nil : .spring(duration: 0.35, bounce: 0.18)) { columns = fitting }
+                withAnimation(columns == nil || reduceMotion ? nil : Theme.morph) { columns = fitting }
             }
     }
 }
