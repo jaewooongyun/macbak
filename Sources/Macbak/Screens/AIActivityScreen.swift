@@ -5,6 +5,7 @@ import SwiftUI
 /// Everything here comes from `AITool.catalog`, so a new tool shows up without touching this file.
 struct AIActivityScreen: View {
     @Environment(AIMonitor.self) private var monitor
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         ScrollView {
@@ -71,7 +72,7 @@ struct AIActivityScreen: View {
                     }
                 }
                 // Animate tools appearing, leaving or reordering; per-sample memory changes would keep rows moving.
-                .animation(.smooth, value: monitor.tools.map(\.id))
+                .animation(reduceMotion ? nil : Theme.stateChange, value: monitor.tools.map(\.id))
             }
         }
     }
@@ -119,23 +120,43 @@ private struct ToolActivity: View {
                 }
             }
             if let stats = monitor.activity?.sessions[tool.id] {
-                ActivityLadder(stats: stats, tint: tool.vendor.tint)
+                ActivityLadder(stats: stats)
                 Text(logSummary(stats)).font(.callout).foregroundStyle(.secondary)
             }
             if let jobs = monitor.activity?.jobs[tool.id] {
-                HStack(spacing: 14) {
-                    Text("백그라운드 작업").foregroundStyle(.secondary)
-                    LegendDot(color: .green, text: "실행 \(jobs.running)")
-                    if jobs.waiting > 0 {
-                        LegendDot(color: .yellow, text: "대기 \(jobs.waiting)").help("입력이나 사용량 한도를 기다리는 작업")
+                // One line when it fits; then the title above the dots; in a narrow card, one dot per line.
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 14) {
+                        jobsTitle
+                        dots(jobs)
                     }
-                    LegendDot(color: .gray, text: "끝남 \(jobs.finished)")
-                    if jobs.unknown > 0 {
-                        LegendDot(color: .orange, text: "모름 \(jobs.unknown)").help("state.json이 없거나 읽을 수 없는 작업 · 0으로 세지 않음")
+                    VStack(alignment: .leading, spacing: 6) {
+                        jobsTitle
+                        HStack(spacing: 12) { dots(jobs) }
+                    }
+                    VStack(alignment: .leading, spacing: 4) {
+                        jobsTitle
+                        dots(jobs)
                     }
                 }
                 .font(.callout)
             }
+        }
+    }
+
+    private var jobsTitle: some View { Text("백그라운드 작업").foregroundStyle(.secondary) }
+
+    /// Job counts by state. Each dot keeps its text on one line (`fixedSize`), so a tight layout moves whole dots
+    /// rather than wrapping "실행 3" in two.
+    @ViewBuilder
+    private func dots(_ jobs: JobStats) -> some View {
+        LegendDot(color: .green, text: "실행 \(jobs.running)").fixedSize()
+        if jobs.waiting > 0 {
+            LegendDot(color: .yellow, text: "대기 \(jobs.waiting)").fixedSize().help("입력이나 사용량 한도를 기다리는 작업")
+        }
+        LegendDot(color: .gray, text: "끝남 \(jobs.finished)").fixedSize()
+        if jobs.unknown > 0 {
+            LegendDot(color: .orange, text: "모름 \(jobs.unknown)").fixedSize().help("state.json이 없거나 읽을 수 없는 작업 · 0으로 세지 않음")
         }
     }
 
@@ -159,22 +180,17 @@ private struct LegendDot: View {
     }
 }
 
-/// Conversations updated within 5 minutes, an hour, a day and a week, as four bars on one scale (the week's count).
+/// Conversations updated within 5 minutes, an hour, a day and a week, as four numbers; an empty period reads quieter.
 private struct ActivityLadder: View {
     let stats: SessionStats
-    let tint: Color
 
     var body: some View {
         let steps = [("5분", stats.within5m), ("1시간", stats.within1h), ("24시간", stats.within24h), ("7일", stats.within7d)]
-        let top = Double(max(stats.within7d, 1))
-        HStack(alignment: .bottom, spacing: 10) {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
             ForEach(steps, id: \.0) { label, count in
                 VStack(spacing: 4) {
-                    RoundedRectangle(cornerRadius: 3, style: .continuous)
-                        .fill(count > 0 ? AnyShapeStyle(tint) : AnyShapeStyle(.quaternary))
-                        .frame(height: max(3, 34 * Double(count) / top))
-                        .frame(height: 34, alignment: .bottom)
                     Text("\(count)").font(Theme.numeral(15)).monospacedDigit().contentTransition(.numericText())
+                        .foregroundStyle(count > 0 ? .primary : .tertiary)
                     Text(label).font(.callout).foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity)
