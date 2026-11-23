@@ -83,7 +83,8 @@ struct CleanupCandidate: Identifiable, Sendable {
     /// - Important: Set by the scanner that makes the row, never by the on-device model.
     var trusted = false
     /// Deleted only when a person ticks it in the dashboard: never ticked to begin with, never in the shallow clean-up,
-    /// whatever its verdict. Rows found outside the usual places, or proven by a method the usual scan does not use, carry it.
+    /// whatever its verdict. Rows proven by a method the usual scan does not use carry it, and so do most rows the
+    /// expanded scan finds; a build cache it finds outside the usual places that passes without re-proving does not.
     var manualOnly = false
     /// Proven only by borrowing package objects from inside its own build cache (the expanded scan); the usual scan
     /// keeps such a row for the alarm it cannot clear.

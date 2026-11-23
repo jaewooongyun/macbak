@@ -150,6 +150,6 @@ import Testing
         try Self.job(box, "done-old")
         let report = AIStorageScanner.scan(running: [], openFiles: OpenFiles.parse(lsofOutput([])), home: box.root)
         let row = try #require(report.candidates.first { $0.id.hasSuffix(".jobs-finished") })
-        #expect(row.targets.isEmpty && row.detail.contains("'프로젝트까지 검사'"))
+        #expect(row.targets.isEmpty && row.detail.contains("디스크 화면에서 골라 지울 수 있음"))
     }
 }

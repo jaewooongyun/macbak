@@ -17,7 +17,7 @@ struct DiskScreen: View {
             candidates: cleanup.all + (storage.report?.candidates ?? []),
             title: "정리 후보",
             note: "이 Mac을 실제로 검사해 세 묶음으로 나눴습니다. 여기서는 고른 뒤 \"정리…\"를 눌러야 지웁니다. 클릭 없이 지우는 것은 메뉴 막대의 즉시 정리와 켜 둔 정기 정리뿐이고, 둘 다 얕은 정리 대상만 지웁니다. 지운 파일은 되돌릴 수 없습니다.",
-            onFinished: rescan
+            onFinished: refresh
         ) { selectedBytes in
             VStack(alignment: .leading, spacing: 20) {
                 if let disk = system.disk {
@@ -33,8 +33,9 @@ struct DiskScreen: View {
             // cards around it are not re-laid out and redrawn for each item the model looks at.
             .animation(.smooth, value: cleanup.explorer.phase != .idle)
         }
+        // The usual and the expanded scan together, when either result is old; the coordinator decides.
         .task {
-            if cleanup.isStale { await cleanup.scan() }
+            await cleanup.scanEverything()
         }
         .task {
             if storage.isStale {
@@ -113,34 +114,41 @@ struct DiskScreen: View {
             }
             Button("다시 검사", action: rescan)
                 .glassAction()
-            Button("프로젝트까지 검사", action: scanProjects)
-                .glassAction()
-                .help("홈 폴더의 프로젝트 안 Xcode 캐시와 시뮬레이터 런타임까지 찾습니다. 1분 남짓 걸리고, 찾은 항목은 직접 골라야만 지웁니다.")
         }
     }
 
-    /// What the latest expanded scan did not look at, and whether its walk ran out of time.
     @ViewBuilder
     private var discoveryNote: some View {
-        if let discovery = cleanup.discovery, cleanup.scanning.isDisjoint(with: CleanupCoordinator.Area.expanded) {
-            Text((discovery.partial ? "프로젝트 검사는 시간이 다 돼 일부만 봤습니다. " : "") + "검사하지 않은 곳: " + discovery.skipped.joined(separator: " · "))
+        if let text = Self.discoveryText(scanningProjects: cleanup.scanning.contains(.projects), discovery: cleanup.discovery) {
+            Text(text)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
-                .help(discovery.skipped.joined(separator: "\n"))
+                .help(cleanup.discovery?.skipped.joined(separator: "\n") ?? "")
         }
     }
 
-    /// The usual scan first, so the expanded one judges against fresh rows; then the walk, runtimes and re-proofs.
-    private func scanProjects() {
-        system.refreshAll()
-        Task {
-            await cleanup.scan()
-            await cleanup.scanProjects()
-        }
+    /// While the expanded scan walks the home, what it does and how long it takes; after it, what it did not look at and
+    /// whether it ran out of time; nil before any.
+    static func discoveryText(scanningProjects: Bool, discovery: ProjectDiscovery.Result?) -> String? {
+        if scanningProjects { return "홈 폴더의 프로젝트까지 찾는 중입니다. 3~4분 걸리고, 찾는 대로 목록에 더합니다." }
+        guard let discovery else { return nil }
+        return (discovery.partial ? "프로젝트 검사는 시간이 다 돼 일부만 봤습니다. " : "") + "검사하지 않은 곳: " + discovery.skipped.joined(separator: " · ")
     }
 
+    /// Both scans again, the expanded one too, whatever their age.
     private func rescan() {
+        system.refreshAll()
+        Task { await cleanup.scanEverything(force: true) }
+        Task {
+            await ai.wake()
+            await storage.scan(using: ai)
+        }
+    }
+
+    /// After a clean-up: the usual scan and the AI storage again. Deleted rows are already gone from every list, so the
+    /// minutes-long walk runs again only once its result is old, or on "다시 검사".
+    private func refresh() {
         system.refreshAll()
         Task { await cleanup.scan() }
         Task {

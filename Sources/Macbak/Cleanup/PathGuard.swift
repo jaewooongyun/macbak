@@ -223,14 +223,20 @@ struct TargetGrant: Hashable, Sendable {
         var home: URL?
         /// Reads a file the judge must look inside; the only way it opens one, so a test can see what it reads.
         var read: @Sendable (URL) -> Data? = { try? Data(contentsOf: $0) }
+        /// The expanded scan's deadline: past it a folder is not judged at all, and walks and git calls end by it.
+        /// nil for the executor, which judges one row at a time.
+        var deadline: ContinuousClock.Instant?
     }
 
     /// Why the folder may not be deleted now, or nil; and the walk, for the row's size and last use.
     static func evaluate(_ grant: TargetGrant, _ inputs: Inputs) -> (refusal: String?, facts: TreeFacts) {
+        let deadline = inputs.deadline
+        if let deadline, ContinuousClock.now >= deadline { return (ProjectOutputScanner.outOfTime, TreeFacts(gap: "시간 초과")) }
         switch grant.kind {
         case .derivedData:
             let folder = grant.path
-            let facts = TreeWalk.inspect(folder, budget: .seconds(120), alarm: { CacheRules.isAlarmName($0, isFolder: $1, reprove: inputs.reprove) })
+            let facts = TreeWalk.inspect(folder, budget: .seconds(120), until: deadline,
+                                         alarm: { CacheRules.isAlarmName($0, isFolder: $1, reprove: inputs.reprove, until: deadline) })
             guard let workspace = XcodeCacheScanner.workspacePath(of: folder) else { return ("작업 공간 기록을 읽지 못했습니다", facts) }
             let has = { (name: String) in FileManager.default.fileExists(atPath: folder.appending(path: name).path(percentEncoded: false)) }
             guard has("Build") || has("SourcePackages") else { return ("Xcode 빌드 캐시 모양이 아닙니다", facts) }
@@ -244,11 +250,12 @@ struct TargetGrant: Hashable, Sendable {
             return (nil, facts)
         case .projectArtifact(let project):
             let folder = grant.path
-            let facts = TreeWalk.inspect(folder, budget: .seconds(60), alarm: CacheRules.isAlarmName)
+            let facts = TreeWalk.inspect(folder, budget: .seconds(60), until: deadline,
+                                         alarm: { CacheRules.isAlarmName($0, isFolder: $1, reprove: false, until: deadline) })
             guard ProjectDiscovery.hasMarker(folder.lastPathComponent, project: project, folder: folder) else {
                 return ("이 이름을 만드는 도구의 프로젝트 파일이 없습니다", facts)
             }
-            switch Git.isIgnored(folder, project: project) {
+            switch Git.isIgnored(folder, project: project, until: deadline) {
             case nil: return ("git으로 확인하지 못했습니다", facts)
             case false?: return ("git이 추적하거나 무시하지 않는 폴더입니다", facts)
             case true?: break

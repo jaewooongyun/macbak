@@ -78,6 +78,18 @@ import Testing
         #expect(side == ScanReport.Summary.Processes(helpersSummed: false, orphans: 1, idleSessions: 1))
     }
 
+    @Test func aListedRowSaysWhetherItIsTickedOrReproven() {
+        let ticked = Self.row("a")
+        #expect(ticked.isPreselected && ScanReport.rowLine(ticked).hasSuffix("\t미리 체크"))
+        var reproven = Self.row("b")
+        reproven.manualOnly = true
+        reproven.reproved = true
+        #expect(ScanReport.rowLine(reproven).hasSuffix("\t다시 증명") && !ScanReport.rowLine(reproven).contains("미리 체크"))
+        var chosen = Self.row("c")
+        chosen.manualOnly = true
+        #expect(!ScanReport.rowLine(chosen).contains("미리 체크") && !ScanReport.rowLine(chosen).contains("다시 증명"))
+    }
+
     @Test func theReportPathCannotDeleteOrEndAnything() throws {
         let file = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appending(path: "Sources/Macbak/App/ScanReport.swift")

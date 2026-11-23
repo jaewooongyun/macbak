@@ -170,8 +170,45 @@ import Testing
         let box = try Sandbox()
         defer { box.remove() }
         let row = try Self.foundCache(box).row
-        #expect(row.reproved && row.isSelectable)
+        #expect(!row.reproved && row.isSelectable && row.isPreselected)
         #expect(row.guards.watchPaths.map(\.path) == ["/nonexistent/App"])
+    }
+
+    /// The executor judges a ticked cache as the usual scan would, and one only a re-proof cleared with the re-proof,
+    /// before the delete and again before the retry.
+    @Test func theExecutorJudgesEachCacheInItsOwnProofMode() async throws {
+        for reproved in [false, true] {
+            let box = try Sandbox()
+            defer { box.remove() }
+            let folder = try ProjectDiscoveryTests.derivedData(box, "dev/app/DerivedData/app-x")
+            let alarmUnlessReproved: ProjectOutputScanner.Judge = { grant, inputs in
+                var judged = TargetGrant.evaluate(grant, inputs)
+                if reproved, !inputs.reprove {
+                    judged.facts.alarm = "credentials"
+                    judged.refusal = CacheRules.alarmReason("credentials")
+                }
+                return judged
+            }
+            var row = try #require(ProjectOutputScanner.rows([folder], context: ProjectDiscoveryTests.context(box.root), lending: .init(), reprove: true,
+                                                             judge: alarmUnlessReproved).first)
+            #expect(row.reproved == reproved && row.isSelectable && row.isPreselected == !reproved)
+            row.scannedAt = .now
+
+            // A file that cannot be removed fails the first delete, so the retry is judged too.
+            let stuck = folder.appending(path: "Build/blob")
+            try FileManager.default.setAttributes([.immutable: true], ofItemAtPath: stuck.path)
+            defer { try? FileManager.default.setAttributes([.immutable: false], ofItemAtPath: stuck.path) }
+            let modes = ScanDeadlineTests.Seen<Bool>()
+            let executor = fixtureExecutor(roots: [], audit: box.root.appending(path: "audit.jsonl")) {
+                $0.home = box.root
+                $0.judgeGrant = { grant, inputs in
+                    modes.add(inputs.reprove)
+                    return TargetGrant.evaluate(grant, inputs)
+                }
+            }
+            _ = await executor.run([row]) { _ in }
+            #expect(modes.all.count == 3 && modes.all.allSatisfy { $0 == reproved }, "\(modes.all)")
+        }
     }
 
     @Test func aWorkspaceFileOpenedWhileTheGrantIsJudgedKeepsTheCache() async throws {

@@ -163,7 +163,9 @@ enum PackageCheckout {
     ///   `.git/objects/info/alternates` is gone (the build cache that lent them was deleted), prove it again against the
     ///   same packages' object folders inside this checkout's own build cache. Only the expanded scan asks for it; it
     ///   costs git calls the periodic scan must not add.
-    static func isPristine(_ url: URL, reprove: Bool = false) -> Bool {
+    /// - Parameter until: every git call and the file listing end by then; past it the answer is false.
+    static func isPristine(_ url: URL, reprove: Bool = false, until: ContinuousClock.Instant? = nil) -> Bool {
+        if let until, ContinuousClock.now >= until { return false }
         let path = url.path(percentEncoded: false)
         let parts = path.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
         // Without developer tools (Xcode removed, its build caches left behind) git would open an install dialog.
@@ -171,11 +173,11 @@ enum PackageCheckout {
               at + 2 < parts.count, DeveloperTools.available else { return false }
         let root = parts[...(at + 1)].joined(separator: "/")
         let inside = parts[(at + 2)...].joined(separator: "/")
-        if proves(url, root: root, inside: inside, environment: nil) { return true }
+        if proves(url, root: root, inside: inside, environment: nil, until: until) { return true }
         guard reprove, let objects = sameCacheObjects(checkout: root, cache: parts[..<(at - 1)].joined(separator: "/")) else { return false }
         // No locks, no lazy fetch: the proof only reads.
         return proves(url, root: root, inside: inside, environment: ["GIT_ALTERNATE_OBJECT_DIRECTORIES": objects.joined(separator: ":"),
-                                                                     "GIT_OPTIONAL_LOCKS": "0", "GIT_NO_LAZY_FETCH": "1"])
+                                                                     "GIT_OPTIONAL_LOCKS": "0", "GIT_NO_LAZY_FETCH": "1"], until: until)
     }
 
     /// The object folders to borrow instead, or nil unless all hold: every folder the checkout's alternates name is gone
@@ -211,10 +213,12 @@ enum PackageCheckout {
     }
 
     /// The proof itself, as described on the type.
-    private static func proves(_ url: URL, root: String, inside: String, environment: [String: String]?) -> Bool {
-        /// The output of a command that succeeded, empty or not; nil when it failed.
+    private static func proves(_ url: URL, root: String, inside: String, environment: [String: String]?, until: ContinuousClock.Instant?) -> Bool {
+        /// The output of a command that succeeded, empty or not; nil when it failed or no time is left.
         func run(_ arguments: [String]) -> Data? {
-            guard let output = Command.run("/usr/bin/git", ["-C", root, "--literal-pathspecs"] + arguments, timeout: .seconds(10),
+            let timeout = ScanSupport.budget(.seconds(10), until: until)
+            guard timeout > .zero,
+                  let output = Command.run("/usr/bin/git", ["-C", root, "--literal-pathspecs"] + arguments, timeout: timeout,
                                            environment: environment),
                   output.status == 0 else { return nil }
             return output.stdout
@@ -233,15 +237,16 @@ enum PackageCheckout {
             guard fields.count == 3, fields[0] == "100644" || fields[0] == "100755", fields[1] == "blob" else { return false }
             committed[String(line[line.index(after: tab)...])] = String(fields[2])
         }
-        guard let disk = regularFiles(at: url), !disk.isEmpty, disk.allSatisfy({ $0.hasPrefix(root + "/") }),
+        guard let disk = regularFiles(at: url, until: until), !disk.isEmpty, disk.allSatisfy({ $0.hasPrefix(root + "/") }),
               let hashes = git(["hash-object", "--no-filters", "--"] + disk) else { return false }
         // A file HEAD does not have there finds no blob and fails; a committed file missing on disk deletes nothing.
         let lines = String(decoding: hashes, as: UTF8.self).split(separator: "\n").map(String.init)
         return lines.count == disk.count && zip(disk, lines).allSatisfy { committed[String($0.dropFirst(root.count + 1))] == $1 }
     }
 
-    /// The item itself if it is a regular file, or every file below it if it is a folder; nil on a link or anything else.
-    private static func regularFiles(at url: URL) -> [String]? {
+    /// The item itself if it is a regular file, or every file below it if it is a folder; nil on a link or anything else,
+    /// or once `until` has passed.
+    private static func regularFiles(at url: URL, until: ContinuousClock.Instant?) -> [String]? {
         let keys: [URLResourceKey] = [.isRegularFileKey, .isDirectoryKey, .isSymbolicLinkKey]
         guard let top = try? url.resourceValues(forKeys: Set(keys)), top.isSymbolicLink != true else { return nil }
         if top.isRegularFile == true { return [url.path(percentEncoded: false)] }
@@ -251,6 +256,7 @@ enum PackageCheckout {
                                                           errorHandler: { _, _ in unreadable = true; return false }) else { return nil }
         var files: [String] = []
         for case let item as URL in walker {
+            if let until, ContinuousClock.now >= until { return nil }
             guard let values = try? item.resourceValues(forKeys: Set(keys)), values.isSymbolicLink != true else { return nil }
             if values.isRegularFile == true { files.append(item.path(percentEncoded: false)) } else if values.isDirectory != true { return nil }
         }
@@ -321,10 +327,15 @@ enum TreeWalk {
     ///   - alarm: items to report in `alarm` wherever they are, so a deep key or disk image can keep the whole row; it is
     ///     told whether the item is a folder.
     ///   - notice: items to report in `noticed` the same way, for a milder consequence.
-    static func inspect(_ url: URL, budget: Duration = .seconds(60), olderThan cutoff: Date? = nil, collect: Bool = false,
-                        alarm: (@Sendable (URL, Bool) -> Bool)? = nil, notice: (@Sendable (URL) -> Bool)? = nil,
+    ///   - until: the walk ends by then whatever `budget` leaves; past it nothing is read and nothing is asked.
+    static func inspect(_ url: URL, budget: Duration = .seconds(60), until: ContinuousClock.Instant? = nil, olderThan cutoff: Date? = nil,
+                        collect: Bool = false, alarm: (@Sendable (URL, Bool) -> Bool)? = nil, notice: (@Sendable (URL) -> Bool)? = nil,
                         clock: ContinuousClock = ContinuousClock()) -> TreeFacts {
         var facts = TreeFacts()
+        if let until, clock.now >= until {
+            facts.gap = "시간 초과"
+            return facts
+        }
         guard let top = try? url.resourceValues(forKeys: keys) else {
             facts.gap = "읽을 수 없음"
             return facts
@@ -351,7 +362,8 @@ enum TreeWalk {
             facts.gap = "열 수 없음"
             return facts
         }
-        let deadline = clock.now.advanced(by: budget)
+        let limit = clock.now.advanced(by: budget)
+        let deadline = until.map { min(limit, $0) } ?? limit
         for case let item as URL in walker {
             // Checked on every item, folders included, so a tree of empty folders cannot outrun the budget.
             if clock.now >= deadline {
@@ -378,11 +390,11 @@ enum TreeWalk {
 
     /// Walks several folders at once, results in the same order. Hundreds of build caches walked one after another took
     /// minutes; an SSD answers many folders in parallel.
-    static func inspectAll(_ urls: [URL], budget: Duration = .seconds(60), alarm: (@Sendable (URL, Bool) -> Bool)? = nil,
-                           notice: (@Sendable (URL) -> Bool)? = nil) -> [TreeFacts] {
+    static func inspectAll(_ urls: [URL], budget: Duration = .seconds(60), until: ContinuousClock.Instant? = nil,
+                           alarm: (@Sendable (URL, Bool) -> Bool)? = nil, notice: (@Sendable (URL) -> Bool)? = nil) -> [TreeFacts] {
         let results = OSAllocatedUnfairLock(initialState: [TreeFacts?](repeating: nil, count: urls.count))
         DispatchQueue.concurrentPerform(iterations: urls.count) { index in
-            let facts = inspect(urls[index], budget: budget, alarm: alarm, notice: notice)
+            let facts = inspect(urls[index], budget: budget, until: until, alarm: alarm, notice: notice)
             results.withLock { $0[index] = facts }
         }
         return results.withLock { found in found.map { $0 ?? TreeFacts(gap: "검사하지 못함") } }

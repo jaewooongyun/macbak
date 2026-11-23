@@ -25,7 +25,7 @@ enum JobScratch {
             return ("작업 상태를 읽지 못했습니다", TreeFacts())
         }
         if inputs.now.timeIntervalSince(stated) < age { return ("최근에 끝난 작업입니다", TreeFacts()) }
-        let facts = TreeWalk.inspect(tmp, budget: .seconds(60))
+        let facts = TreeWalk.inspect(tmp, budget: .seconds(60), until: inputs.deadline)
         guard facts.isComplete else { return ("다 훑지 못했습니다", facts) }
         guard let newest = facts.newest else { return ("빈 임시 폴더입니다", facts) }
         if inputs.now.timeIntervalSince(newest) < age { return ("최근에 바뀐 파일이 있습니다", facts) }
@@ -60,7 +60,7 @@ enum JobScratchScanner {
                 guard FileManager.default.fileExists(atPath: tmp.path(percentEncoded: false)) else { return nil }
                 let grant = TargetGrant(kind: .jobScratch, path: tmp)
                 let judged = judge(grant, .init(now: context.now, ages: context.ages, open: context.openFiles, borrowers: [], reprove: false,
-                                                home: context.home))
+                                                home: context.home, deadline: context.deadline))
                 guard judged.facts.bytes >= ScanSupport.minimumBytes || !judged.facts.isComplete else { return nil }
                 var evidence = Evidence(verified: true, inUse: false, regenerable: false, userData: true)
                 evidence.protectedReason = judged.refusal

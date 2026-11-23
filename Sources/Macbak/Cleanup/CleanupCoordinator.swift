@@ -12,7 +12,8 @@ final class CleanupCoordinator {
 
         /// What `scan()` reads: the loop, the menu and the dashboard.
         static let regular: [Area] = [.xcode, .appCaches, .devices, .general]
-        /// What only `scanProjects()` reads: slow, or outside the usual places.
+        /// What only the expanded scan reads (the dashboard's `scanEverything()` and `--scan-report`): slow, or outside
+        /// the usual places.
         static let expanded: [Area] = [.runtimes, .projects, .jobs]
 
         var title: String {
@@ -37,6 +38,9 @@ final class CleanupCoordinator {
         /// The usual build-cache rows of the workspaces holding these caches, their package checkouts proven again.
         /// - Important: The only place that turns re-proving on; the loop and the menu never reach it.
         var reprove: @Sendable (ScanContext, Set<String>) -> [CleanupCandidate] = { XcodeCacheScanner.scan($0, only: $1, reprove: true) }
+        /// How long the expanded scan may take to judge, from its start; the folders left then are counted, not judged.
+        /// Measured 2026-11-23: about 196 s for the whole scan on a full home, inside the 600 s a result lives.
+        var judgeBudget: Duration = .seconds(240)
     }
 
     /// What the expanded scan proved of a usual build-cache row: its alarm cleared by re-proving its package checkouts.
@@ -56,6 +60,8 @@ final class CleanupCoordinator {
     private(set) var generation = 0
     /// When the latest expanded scan started; nil before one, or when Settings changed while it read.
     private(set) var projectsScannedAt: Date?
+    /// The ages the latest finished expanded scan judged by.
+    private(set) var projectsScannedAges: CleanupAges?
     /// What the latest expanded scan's walk skipped and whether it finished.
     private(set) var discovery: ProjectDiscovery.Result?
     /// Usual rows the expanded scan proved again, by id; dropped once that scan is older than the result lifetime.
@@ -69,11 +75,16 @@ final class CleanupCoordinator {
     @ObservationIgnored private var current: Task<Void, Never>?
     /// The expanded scan in progress, likewise.
     @ObservationIgnored private var projectsTask: Task<Void, Never>?
+    /// Re-proven rows that landed while the usual Xcode rows were still being read; lifted against those once, when
+    /// they land.
+    @ObservationIgnored private var pendingReproofs: [CleanupCandidate]?
     /// Looks at the rows the rules could not tell, after each scan.
     let explorer: CacheExplorer
     /// Whether a clean-up is deleting now. A scan waits for it to finish, so no new hold or verdict lands on rows a run
     /// was handed; together with the runner waiting for a scan in progress, scans and runs never overlap.
     @ObservationIgnored var isDeleting: @MainActor () -> Bool = { false }
+    /// The clock the freshness checks read; tests move it.
+    @ObservationIgnored var now: () -> Date = { .now }
 
     init(settings: CleanupSettings? = nil, scanning: Scanning = Scanning()) {
         scansDisk = true
@@ -98,8 +109,7 @@ final class CleanupCoordinator {
     /// scan is fresh and the row is unchanged, is a choice only (`manualOnly`, `reproved`) instead of protected.
     func rows(in area: Area) -> [CleanupCandidate] {
         let rows = candidates[area] ?? []
-        guard area == .xcode, !lifts.isEmpty,
-              let at = projectsScannedAt, Date.now.timeIntervalSince(at) <= CleanupCandidate.resultLifetime else { return rows }
+        guard area == .xcode, !lifts.isEmpty, !isProjectsStale else { return rows }
         return rows.map { row in
             guard let lift = lifts[row.id], lift.targets == row.targets, lift.lastUsed == row.lastUsed,
                   row.evidence.protectedReason == lift.reason else { return row }
@@ -114,7 +124,12 @@ final class CleanupCoordinator {
     }
     /// No scan yet, the last one is older than the result lifetime, or it judged by ages Settings no longer hold.
     var isStale: Bool {
-        scansDisk && (scannedAt.map { Date.now.timeIntervalSince($0) > CleanupCandidate.resultLifetime } ?? true || scannedAges != ages)
+        scansDisk && (scannedAt.map { now().timeIntervalSince($0) > CleanupCandidate.resultLifetime } ?? true || scannedAges != ages)
+    }
+    /// The same for the expanded scan.
+    var isProjectsStale: Bool {
+        scansDisk && (projectsScannedAt.map { now().timeIntervalSince($0) > CleanupCandidate.resultLifetime } ?? true
+            || projectsScannedAges != ages)
     }
 
     /// Scans every area. A call while a scan runs waits for that scan rather than returning at once, so the caller
@@ -125,23 +140,48 @@ final class CleanupCoordinator {
             do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
         }
         guard scansDisk else { return }
-        if let current { return await current.value }
+        await (current ?? startScan()).value
+    }
+
+    /// The dashboard's scan: the usual and the expanded one together, unless both results are still fresh. A call while
+    /// an expanded scan runs joins it and then looks again, so ages Settings changed meanwhile still get a scan by them.
+    /// - Parameter force: scans even when both results are fresh, as the dashboard's "다시 검사" does.
+    func scanEverything(force: Bool = false) async {
+        guard scansDisk else { return }
+        if let projectsTask {
+            await projectsTask.value
+            // A usual scan still running reads as stale until it lands; looking before then would walk again.
+            await current?.value
+            if Task.isCancelled || (!isStale && !isProjectsStale) { return }
+        } else if !force, let current, !isProjectsStale {
+            // The walk is fresh and only the usual scan runs: its result decides, or starting now would walk again.
+            await current.value
+            if Task.isCancelled || !isStale { return }
+        } else if !(force || isStale || isProjectsStale) {
+            return
+        }
+        while isDeleting() {
+            do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
+        }
+        // Both registered in this one turn of the main actor: a run starting now waits for both, never for one alone.
+        let usual = current ?? startScan()
+        let expanded = projectsTask ?? startProjects()
+        await usual.value
+        await expanded.value
+    }
+
+    /// Starts the usual scan. Synchronous, so a caller can register it with the expanded one before anything else runs.
+    private func startScan() -> Task<Void, Never> {
         let task = Task { [self] in
             await scanAll()
             current = nil
         }
         current = task
-        await task.value
+        return task
     }
 
-    /// The expanded scan, for the dashboard's "프로젝트까지 검사" and `--scan-report` only — never the loop or the menu.
-    /// Its rows stay until the next expanded scan; each carries its own scan time, which the executor ages like any row.
-    func scanProjects() async {
-        while isDeleting() {
-            do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
-        }
-        guard scansDisk else { return }
-        if let projectsTask { return await projectsTask.value }
+    /// Starts the expanded scan, likewise.
+    private func startProjects() -> Task<Void, Never> {
         let task = Task { [self] in
             // Shown before the open-files snapshot the context takes, which takes seconds.
             scanning.formUnion(Area.expanded)
@@ -149,7 +189,17 @@ final class CleanupCoordinator {
             projectsTask = nil
         }
         projectsTask = task
-        await task.value
+        return task
+    }
+
+    /// The expanded scan, for the dashboard's `scanEverything()` and `--scan-report` only — never the loop or the menu.
+    /// Its rows stay until the next expanded scan; each carries its own scan time, which the executor ages like any row.
+    func scanProjects() async {
+        while isDeleting() {
+            do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
+        }
+        guard scansDisk else { return }
+        await (projectsTask ?? startProjects()).value
     }
 
     private func scanAll() async {
@@ -181,6 +231,10 @@ final class CleanupCoordinator {
             for await (area, found) in group {
                 candidates[area] = Self.stamped(found, context)
                 scanning.remove(area)
+                if area == .xcode, let pending = pendingReproofs {
+                    lifts = Self.lifts(pending, usual: candidates[.xcode] ?? [])
+                    pendingReproofs = nil
+                }
             }
         }
     }
@@ -194,6 +248,10 @@ final class CleanupCoordinator {
             case projects([CleanupCandidate], ProjectDiscovery.Result, reproved: [CleanupCandidate])
         }
         let sources = sources
+        let deadline = ContinuousClock.now.advanced(by: sources.judgeBudget)
+        var bounded = context
+        bounded.deadline = deadline
+        let context = bounded
         await withTaskGroup(of: Part.self) { group in
             group.addTask(priority: .utility) { .runtimes(sources.area(.runtimes, context)) }
             group.addTask(priority: .utility) { .jobs(sources.area(.jobs, context)) }
@@ -201,14 +259,22 @@ final class CleanupCoordinator {
                 let discovery = sources.discover(context)
                 let standard = XcodeCacheScanner.standardCaches(context.home)
                 let lending = XcodeCacheScanner.lendingMap(caches: standard + discovery.derivedData, memory: context.borrowerMemory)
-                let rows = ProjectOutputScanner.rows(discovery.derivedData, context: context, lending: lending, reprove: true)
+                let judged = ProjectOutputScanner.rows(discovery.derivedData, context: context, lending: lending, reprove: true)
                     + ProjectOutputScanner.artifactRows(discovery.artifacts, context: context)
                     + ProjectOutputScanner.nodeModulesRows(discovery.nodeModules, context: context)
+                // Reached after the deadline: unknown, like what the walk did not reach, so counted rather than listed.
+                let rows = judged.filter { $0.evidence.protectedReason != ProjectOutputScanner.outOfTime }
+                var found = discovery
+                if rows.count < judged.count {
+                    found.partial = true
+                    found.skipped.append("시간이 다 돼 판정하지 못한 폴더 \(judged.count - rows.count)곳")
+                }
                 // Both sides resolved: listed folders end in "/", resolved ones do not.
                 let key = { (url: URL) in PathKey.fold(PathGuard.realPath(url) ?? url.path(percentEncoded: false)) }
                 let usual = Set(standard.map(key))
                 let broken = lending.broken.filter { usual.contains(key(URL(fileURLWithPath: $0))) }
-                return .projects(rows, discovery, reproved: broken.isEmpty ? [] : sources.reprove(context, broken))
+                let late = ContinuousClock.now >= deadline
+                return .projects(rows, found, reproved: broken.isEmpty || late ? [] : sources.reprove(context, broken))
             }
             for await part in group {
                 switch part {
@@ -221,7 +287,14 @@ final class CleanupCoordinator {
                 case .projects(let rows, let found, let reproved):
                     candidates[.projects] = Self.stamped(rows, context)
                     discovery = found
-                    lifts = Self.lifts(reproved, usual: candidates[.xcode] ?? [])
+                    // The dashboard reads both at once: the usual Xcode rows may not be in yet.
+                    if scanning.contains(.xcode) {
+                        // The lifts of the scan before must not stand under this scan's time meanwhile.
+                        pendingReproofs = reproved
+                        lifts = [:]
+                    } else {
+                        lifts = Self.lifts(reproved, usual: candidates[.xcode] ?? [])
+                    }
                     scanning.remove(.projects)
                 }
             }
@@ -229,10 +302,12 @@ final class CleanupCoordinator {
         // Settings changed while it read: as for the usual scan, its rows stay stale and its lifts are not applied.
         guard context.ages == ages else {
             projectsScannedAt = nil
+            projectsScannedAges = nil
             lifts = [:]
             return
         }
         projectsScannedAt = context.now
+        projectsScannedAges = context.ages
     }
 
     /// A re-proven row that a person may pick where the usual row with the same targets and last use is protected.

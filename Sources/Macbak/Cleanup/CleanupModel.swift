@@ -58,8 +58,15 @@ extension CleanupCandidate {
     /// Ticked to begin with: only rows that passed every check, need no choice, and may go without being picked.
     var isPreselected: Bool { !manualOnly && !targets.isEmpty && verdict.status == .ready }
 
-    /// In the menu bar's immediate clean-up: ticked, and vouched for by a curated source.
-    var isShallow: Bool { trusted && isPreselected }
+    /// In the menu bar's immediate clean-up: ticked, and vouched for by a curated source. Never a folder only its grant
+    /// lets go, nor a runtime: those the dashboard deletes, a person looking.
+    var isShallow: Bool {
+        trusted && isPreselected && !targets.contains { target in
+            if target.grant != nil { return true }
+            if case .deleteRuntime = target.action { return true }
+            return false
+        }
+    }
 
     /// The confirmed rows that the latest scan still offers unchanged: a rescan while the confirmation was open may have
     /// protected or replaced some, and those are dropped rather than deleted on the old verdict.

@@ -91,9 +91,11 @@ enum XcodeCacheScanner {
             }
         }
         // The same deep checks a run nobody chose makes before deleting, so a row shown as shallow is not refused then.
-        let facts = TreeWalk.inspectAll(found.map(\.item), budget: .seconds(120),
-                                        alarm: { CacheRules.isAlarmName($0, isFolder: $1, reprove: reprove) },
-                                        notice: { CacheRules.blocksShallow($0, reprove: reprove) })
+        // The expanded scan's re-proof ends by its deadline; the usual scan has none.
+        let deadline = context.deadline
+        let facts = TreeWalk.inspectAll(found.map(\.item), budget: .seconds(120), until: deadline,
+                                        alarm: { CacheRules.isAlarmName($0, isFolder: $1, reprove: reprove, until: deadline) },
+                                        notice: { CacheRules.blocksShallow($0, reprove: reprove, until: deadline) })
         var members: [Member] = []
         var shared: [Member] = []
         for (entry, facts) in zip(found, facts) {

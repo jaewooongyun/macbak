@@ -143,17 +143,32 @@ enum ProjectDiscovery {
     }
 }
 
-/// Rows for the build caches the walk found outside the usual places, one per folder. Each is judged by its grant, the
-/// same function the executor asks again before deleting it, and only a person picks it.
+/// Rows for the build outputs the walk found outside the usual places, one per folder. Each is judged by its grant, the
+/// same function the executor asks again before deleting it. Never in the shallow clean-up: a granted folder is the
+/// dashboard's only (`isShallow`).
 enum ProjectOutputScanner {
     typealias Judge = @Sendable (TargetGrant, TargetGrant.Inputs) -> (refusal: String?, facts: TreeFacts)
 
+    /// The refusal of a folder reached after the expanded scan's deadline; the coordinator counts these rather than list them.
+    static let outOfTime = "시간이 다 돼 판정하지 못했습니다"
+
+    /// Each cache is judged as the usual scan would first. Only when an alarm kept it, and the caller allows re-proving,
+    /// it is judged again with the package proof re-proven. One that passes the first way is ticked to begin with in the
+    /// dashboard; one only the re-proof cleared, and every one while the borrower memory does not read, a person picks.
     static func rows(_ found: [URL], context: ScanContext, lending: XcodeCacheScanner.Lending, reprove: Bool,
                      judge: Judge = TargetGrant.evaluate) -> [CleanupCandidate] {
         found.compactMap { folder in
             let grant = TargetGrant(kind: .derivedData, path: folder)
-            let judged = judge(grant, .init(now: context.now, ages: context.ages, open: context.openFiles,
-                                            borrowers: Array(lending.outside(folder, row: [folder])), reprove: reprove))
+            let inputs = TargetGrant.Inputs(now: context.now, ages: context.ages, open: context.openFiles,
+                                            borrowers: Array(lending.outside(folder, row: [folder])), reprove: false, deadline: context.deadline)
+            var judged = judge(grant, inputs)
+            var reproved = false
+            if reprove, judged.facts.alarm != nil {
+                var again = inputs
+                again.reprove = reprove
+                judged = judge(grant, again)
+                reproved = true
+            }
             guard judged.facts.bytes >= ScanSupport.minimumBytes || !judged.facts.isComplete else { return nil }
             var evidence = Evidence(verified: true, inUse: false, regenerable: true)
             evidence.protectedReason = judged.refusal
@@ -168,8 +183,8 @@ enum ProjectOutputScanner {
                 targets: [CleanupTarget(path: folder, root: folder.deletingLastPathComponent(), identity: FileIdentity.of(path),
                                         action: .removeItem, grant: grant)],
                 lastUsed: judged.facts.newest)
-            row.manualOnly = true
-            row.reproved = reprove
+            row.manualOnly = reproved || lending.memoryCorrupt
+            row.reproved = reproved
             // The judge read open files under the workspace's folder too; the executor asks it again from a fresh snapshot.
             if let workspace { row.guards.watchPaths = [workspace.deletingLastPathComponent()] }
             return row
@@ -181,7 +196,7 @@ enum ProjectOutputScanner {
         found.compactMap { artifact in
             let grant = TargetGrant(kind: .projectArtifact(project: artifact.project), path: artifact.folder)
             let judged = judge(grant, .init(now: context.now, ages: context.ages, open: context.openFiles, borrowers: [], reprove: false,
-                                            home: context.home))
+                                            home: context.home, deadline: context.deadline))
             guard judged.facts.bytes >= ScanSupport.minimumBytes || !judged.facts.isComplete else { return nil }
             var evidence = Evidence(verified: true, inUse: false, regenerable: true)
             evidence.protectedReason = judged.refusal
@@ -206,7 +221,7 @@ enum ProjectOutputScanner {
         found.compactMap { folder in
             let grant = TargetGrant(kind: .nodeModules, path: folder)
             let judged = judge(grant, .init(now: context.now, ages: context.ages, open: context.openFiles, borrowers: [], reprove: false,
-                                            home: context.home))
+                                            home: context.home, deadline: context.deadline))
             guard judged.facts.bytes >= ScanSupport.minimumBytes || !judged.facts.isComplete else { return nil }
             var evidence = Evidence(verified: true, inUse: false, regenerable: true)
             evidence.protectedReason = judged.refusal
@@ -259,7 +274,9 @@ enum NodeModules {
     }
 
     static func refusal(_ folder: URL, _ inputs: TargetGrant.Inputs) -> (String?, TreeFacts) {
-        var facts = TreeWalk.inspect(folder, budget: .seconds(60), alarm: CacheRules.isAlarmName)
+        let deadline = inputs.deadline
+        var facts = TreeWalk.inspect(folder, budget: .seconds(60), until: deadline,
+                                     alarm: { CacheRules.isAlarmName($0, isFolder: $1, reprove: false, until: deadline) })
         let project = folder.deletingLastPathComponent()
         var info = stat()
         if lstat(folder.path(percentEncoded: false), &info) != 0 || info.st_mode & S_IFMT == S_IFLNK { return ("링크이거나 읽을 수 없습니다", facts) }
@@ -281,7 +298,7 @@ enum NodeModules {
             if index > 0, has(place, "pnpm-workspace.yaml") || has(place, "lerna.json") { return ("워크스페이스 멤버라 루트에서 함께 설치합니다", facts) }
         }
         if let alarm = facts.alarm { return (CacheRules.alarmReason(alarm), facts) }
-        guard facts.isComplete, let activity = lastActivity(project) else { return ("다 훑지 못해 마지막 사용 시각을 모릅니다", facts) }
+        guard facts.isComplete, let activity = lastActivity(project, until: deadline) else { return ("다 훑지 못해 마지막 사용 시각을 모릅니다", facts) }
         facts.newest = activity
         if inputs.now.timeIntervalSince(activity) < inputs.ages.seconds(.nodeModules) { return ("최근에 쓰거나 설치했습니다.", facts) }
         guard let open = inputs.open else { return ("열린 파일을 확인하지 못했습니다", facts) }
@@ -293,8 +310,9 @@ enum NodeModules {
 
     /// The latest change to the project outside `node_modules`, to `node_modules`' top entries (an install moves them;
     /// package files themselves carry the dates their authors packed) and to the install records; nil when a part cannot
-    /// be read in time.
-    static func lastActivity(_ project: URL) -> Date? {
+    /// be read in time, or `until` has passed.
+    static func lastActivity(_ project: URL, until: ContinuousClock.Instant? = nil) -> Date? {
+        if let until, ContinuousClock.now >= until { return nil }
         let keys: Set<URLResourceKey> = [.contentModificationDateKey, .isDirectoryKey, .isSymbolicLinkKey]
         var newest = Date.distantPast
         guard let entries = try? FileManager.default.contentsOfDirectory(at: project, includingPropertiesForKeys: Array(keys)) else { return nil }
@@ -308,7 +326,7 @@ enum NodeModules {
                 }
                 newest = max(newest, modified)
             } else if values.isDirectory == true, values.isSymbolicLink != true {
-                let facts = TreeWalk.inspect(entry, budget: .seconds(30))
+                let facts = TreeWalk.inspect(entry, budget: .seconds(30), until: until)
                 guard facts.isComplete else { return nil }
                 newest = max(newest, facts.newest ?? modified)
             } else {
@@ -337,9 +355,11 @@ enum Git {
 
     /// Whether git ignores `folder` whole; nil when it cannot tell. A folder with any file git tracks inside is not
     /// ignored: `check-ignore` consults the index (measured 2026-11-23: a tracked file deep inside turns 0 into 1).
-    static func isIgnored(_ folder: URL, project: URL) -> Bool? {
+    /// nil too once `until` has passed.
+    static func isIgnored(_ folder: URL, project: URL, until: ContinuousClock.Instant? = nil) -> Bool? {
         let relative = String(folder.path(percentEncoded: false).dropFirst(project.path(percentEncoded: false).count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        guard !relative.isEmpty, let check = run(project, ["check-ignore", "-q", "--", relative], timeout: .seconds(30)) else { return nil }
+        let timeout = ScanSupport.budget(.seconds(30), until: until)
+        guard !relative.isEmpty, timeout > .zero, let check = run(project, ["check-ignore", "-q", "--", relative], timeout: timeout) else { return nil }
         // 0 ignored, 1 not ignored, anything else an error.
         guard check.status == 0 || check.status == 1 else { return nil }
         return check.status == 0

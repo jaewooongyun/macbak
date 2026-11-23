@@ -1,6 +1,7 @@
 import Foundation
 
-/// `--scan-report`: scans the real disk the way the disk screen does and prints every candidate with its verdict, then
+/// `--scan-report`: scans the real disk with the disk screen's two scans, the usual one and then the expanded one (the
+/// screen runs them at once), and prints every candidate with its verdict, then
 /// exits. Read-only — it never deletes — so a scanner change can be checked against the actual Mac before any clean-up.
 @MainActor
 enum ScanReport {
@@ -59,9 +60,7 @@ enum ScanReport {
                 let rows = found.filter { $0.verdict.status == status }
                 guard !rows.isEmpty else { continue }
                 print("  [\(status.title)] \(rows.count)개 · \(rows.reduce(0) { $0 + $1.bytes }.diskText)")
-                for row in rows {
-                    print("    \(row.lowerBound ? "≥" : "")\(row.bytes.diskText)\t\(row.name)\t\(row.verdict.reason)\t\(row.detail)")
-                }
+                for row in rows { print(rowLine(row)) }
             }
         }
         let forbidden = CleanupRoots.forbidden(home: FileManager.default.homeDirectoryForCurrentUser).map { PathKey.fold($0.path(percentEncoded: false)) }
@@ -129,6 +128,14 @@ enum ScanReport {
         var lifts: Int
         /// nil when the process list could not be read.
         var processes: Processes?
+    }
+
+    /// A row in the per-area listing, marked when the dashboard ticks it to begin with or only a re-proof cleared it.
+    nonisolated static func rowLine(_ row: CleanupCandidate) -> String {
+        var line = "    \(row.lowerBound ? "≥" : "")\(row.bytes.diskText)\t\(row.name)\t\(row.verdict.reason)\t\(row.detail)"
+        if row.isPreselected { line += "\t미리 체크" }
+        if row.reproved { line += "\t다시 증명" }
+        return line
     }
 
     /// One line per area and state: counts only, never a row's name or path.

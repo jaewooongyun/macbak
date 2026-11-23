@@ -11,6 +11,8 @@ final class CleanupRunner {
     /// The run going is the loop's own (`runShallow`), not one a screen started while the loop waits for it; the menu
     /// footer's stop belongs to the loop's run only.
     private(set) var isLoopRun = false
+    /// The run is waiting for a scan in progress and has deleted nothing yet; the run panel says so.
+    private(set) var isSettling = false
     @ObservationIgnored private let executor: CleanupExecutor
     /// The row as the screens hold it now, by id; the executor asks it just before deleting each row.
     @ObservationIgnored private let latest: @MainActor (String) -> CleanupCandidate?
@@ -47,9 +49,12 @@ final class CleanupRunner {
             isRunning = false
             isStopping = false
             isLoopRun = false
+            isSettling = false
         }
         // Set before waiting: a scan asked for from now on waits until this run ends.
+        isSettling = true
         await settle()
+        isSettling = false
         let latest = latest
         let report = await executor.run(items, latest: { id in await latest(id) }, shallow: shallow,
                                         stop: { [weak self] in await self?.isStopping ?? true }) { result in await progress(result) }
@@ -94,7 +99,8 @@ final class CleanupRunner {
 
 /// Candidates grouped by status, with selection, a floating selection bar, a confirmation listing exactly what goes, and
 /// the real run ticking off each item as it is deleted or skipped.
-/// - Note: Selection resets to the pre-ticked rows whenever the candidate list changes, such as after a rescan.
+/// - Note: When rows come or go, or their verdicts change, the ticks the person left stay and only new or newly ready
+///   rows start ticked; see `kept` and `reselect`.
 struct CleanupBoard<Header: View>: View {
     let candidates: [CleanupCandidate]
     let title: String
@@ -166,10 +172,11 @@ struct CleanupBoard<Header: View>: View {
         .sheet(item: $pending) { pending in
             ConfirmCleanupSheet(items: pending.items) { perform(CleanupCandidate.stillCurrent(pending.items, in: candidates)) }
         }
-        .onChange(of: candidates.map(\.id)) {
+        // Rows came or went, as when the expanded scan adds its rows minutes after the usual ones.
+        .onChange(of: candidates.map(\.id)) { before, _ in
             guard run == nil else { return }
             cleaned = []
-            selected = Self.preselected(candidates)
+            selected = Self.kept(selected, idsBefore: before, rows: candidates)
         }
         // The same rows with new verdicts, as when the on-device model has looked: the ids stay, the ticks follow.
         .onChange(of: Self.preselected(candidates)) { before, _ in
@@ -178,10 +185,23 @@ struct CleanupBoard<Header: View>: View {
     }
 
     /// The ticks after verdicts changed on the same rows: a row that has just become ready is ticked, a row that can no
-    /// longer be chosen is unticked, and a tick the person removed stays removed.
+    /// longer be chosen or that now waits for a hand pick is unticked, and a tick the person removed stays removed.
     static func reselect(_ selected: Set<String>, preselectedBefore: Set<String>, rows: [CleanupCandidate]) -> Set<String> {
         let selectable = Set(rows.filter(\.isSelectable).map(\.id))
-        return selected.union(preselected(rows).subtracting(preselectedBefore)).intersection(selectable)
+        let now = preselected(rows)
+        return selected.subtracting(preselectedBefore.subtracting(now)).union(now.subtracting(preselectedBefore)).intersection(selectable)
+    }
+
+    /// The run panel's words: while the run waits for a scan in progress it says it will delete once that ends.
+    static func wording(settling: Bool) -> RunWording {
+        settling ? RunWording(running: "진행 중인 검사가 끝나면 지웁니다", finished: RunWording.cleanup.finished, note: RunWording.cleanup.note) : .cleanup
+    }
+
+    /// The ticks after rows came or went: ticks on rows still listed stay as the person left them, a new row ticked to
+    /// begin with is ticked, and a row that can no longer be chosen is unticked.
+    static func kept(_ selected: Set<String>, idsBefore: [String], rows: [CleanupCandidate]) -> Set<String> {
+        let selectable = Set(rows.filter(\.isSelectable).map(\.id))
+        return selected.union(preselected(rows).subtracting(idsBefore)).intersection(selectable)
     }
 
     private var intro: some View {
@@ -283,7 +303,7 @@ struct CleanupBoard<Header: View>: View {
             actionTitle: "정리…",
             canRun: !selectedItems.isEmpty && !runner.isRunning,
             run: run,
-            wording: .cleanup,
+            wording: Self.wording(settling: runner.isSettling),
             total: { Int64($0).diskText },
             start: { pending = Pending(items: selectedItems) },
             close: {

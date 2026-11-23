@@ -15,9 +15,10 @@ import Testing
         return box.root.appending(path: path)
     }
 
-    static func context(_ home: URL, open: [String] = [], now: Date = .now, memory: BorrowerMemory? = nil) -> ScanContext {
+    static func context(_ home: URL, open: [String] = [], now: Date = .now, memory: BorrowerMemory? = nil,
+                        ages: CleanupAges = CleanupAges()) -> ScanContext {
         ScanContext(home: home, now: now, openFiles: OpenFiles.parse(lsofOutput(open)), runningBundleIDs: [], installedBundleIDs: [],
-                    borrowerMemory: memory)
+                    ages: ages, borrowerMemory: memory)
     }
 
     // MARK: The walk
@@ -70,12 +71,68 @@ import Testing
         let rows = Dictionary(uniqueKeysWithValues: ProjectOutputScanner.rows([quiet, fresh, open], context: context, lending: .init(), reprove: true)
             .map { ($0.targets[0].path.path, $0) })
         let ready = try #require(rows[quiet.path])
-        #expect(ready.verdict.status == .ready && ready.manualOnly && !ready.isPreselected && !ready.isShallow && ready.isSelectable)
+        #expect(ready.verdict.status == .ready && !ready.manualOnly && ready.isPreselected && !ready.isShallow && ready.isSelectable && !ready.reproved)
         #expect(ready.targets[0].grant == TargetGrant(kind: .derivedData, path: quiet))
         #expect(rows[fresh.path]?.verdict.reason == "최근에 썼습니다.")
         #expect(rows[open.path]?.verdict.reason == "지금 쓰는 파일이 있습니다")
         let lent = ProjectOutputScanner.rows([quiet], context: context, lending: .init(borrowers: [quiet.path: ["/x/.git/objects/info/alternates"]]), reprove: true)
         #expect(lent.first?.verdict.reason == "다른 캐시가 이 캐시의 패키지 기록을 빌려 씁니다")
+    }
+
+    /// A judge that answers in turn (the last answer repeats), noting the proof mode each call asked for.
+    static func scripted(_ answers: [(refusal: String?, alarm: String?)], modes: ScanDeadlineTests.Seen<Bool>) -> ProjectOutputScanner.Judge {
+        { _, inputs in
+            let answer = answers[min(modes.all.count, answers.count - 1)]
+            modes.add(inputs.reprove)
+            return (answer.refusal, TreeFacts(bytes: 2_000_000, files: 1, newest: daysAgo(2), alarm: answer.alarm))
+        }
+    }
+
+    static func judgedRow(_ answers: [(refusal: String?, alarm: String?)], reprove: Bool = true, lending: XcodeCacheScanner.Lending = .init())
+        throws -> (row: CleanupCandidate, modes: [Bool]) {
+        let modes = ScanDeadlineTests.Seen<Bool>()
+        let rows = ProjectOutputScanner.rows([URL(fileURLWithPath: "/tmp/dev/DerivedData/app")], context: Self.context(URL(fileURLWithPath: "/tmp")),
+                                             lending: lending, reprove: reprove, judge: Self.scripted(answers, modes: modes))
+        return (try #require(rows.first), modes.all)
+    }
+
+    static let alarm = (refusal: Optional(CacheRules.alarmReason("credentials")), alarm: Optional("credentials"))
+
+    @Test func aCacheThatPassesWithoutReprovingIsTickedButNeverShallow() throws {
+        let (row, modes) = try Self.judgedRow([(nil, nil)])
+        #expect(row.isPreselected && !row.isShallow && !row.reproved && !row.manualOnly)
+        #expect(modes == [false])
+    }
+
+    @Test func aCacheOnlyAReproofClearsIsAChoiceOnly() throws {
+        let (row, modes) = try Self.judgedRow([Self.alarm, (nil, nil)])
+        #expect(row.manualOnly && row.reproved && row.isSelectable && !row.isPreselected)
+        #expect(modes == [false, true])
+    }
+
+    @Test func withoutLeaveToReproveAnAlarmKeepsTheCache() throws {
+        let (row, modes) = try Self.judgedRow([Self.alarm], reprove: false)
+        #expect(!row.isSelectable && !row.reproved && modes == [false])
+    }
+
+    @Test func anAlarmTheReproofDoesNotClearKeepsTheCache() throws {
+        let (row, modes) = try Self.judgedRow([Self.alarm, Self.alarm])
+        #expect(!row.isSelectable && row.reproved && modes == [false, true])
+    }
+
+    @Test func everyOtherRefusalStaysAsItWasAfterOneJudgement() throws {
+        for reason in ["작업 공간 기록을 읽지 못했습니다", "Xcode 빌드 캐시 모양이 아닙니다", "다 훑지 못해 마지막 사용 시각을 모릅니다", "최근에 썼습니다.",
+                       "열린 파일을 확인하지 못했습니다", "지금 쓰는 파일이 있습니다", "다른 캐시가 이 캐시의 패키지 기록을 빌려 씁니다", ProjectOutputScanner.outOfTime] {
+            let (row, modes) = try Self.judgedRow([(reason, nil)])
+            #expect(row.evidence.protectedReason == reason && !row.isSelectable && modes == [false], "\(reason)")
+        }
+    }
+
+    @Test func anUnreadableBorrowerMemoryMakesEveryCacheAChoice() throws {
+        var lending = XcodeCacheScanner.Lending()
+        lending.memoryCorrupt = true
+        let (row, _) = try Self.judgedRow([(nil, nil)], lending: lending)
+        #expect(row.manualOnly && !row.isPreselected && !row.reproved)
     }
 
     // MARK: The coordinator
@@ -94,26 +151,70 @@ import Testing
         var value: Bool { get { lock.withLock { on } } set { lock.withLock { on = newValue } } }
     }
 
-    /// A coordinator on `home` that counts the walk, the runtime listing and the re-proof; the usual areas other than
-    /// Xcode's stay empty, so nothing outside the sandbox is read.
+    /// Holds whoever passes while it is shut, at most ten seconds, until `open()`; once open, nobody waits.
+    final class Hold: @unchecked Sendable {
+        private let lock = NSLock()
+        private let gate = DispatchSemaphore(value: 0)
+        private var shut: Bool
+        private var waiting = 0
+        init(shut: Bool = false) { self.shut = shut }
+        var held: Int { lock.withLock { waiting } }
+        func close() { lock.withLock { shut = true } }
+        func pass() {
+            let wait = lock.withLock {
+                if shut { waiting += 1 }
+                return shut
+            }
+            guard wait else { return }
+            _ = gate.wait(timeout: .now() + 10)
+            lock.withLock { waiting -= 1 }
+        }
+        func open() {
+            let count = lock.withLock {
+                shut = false
+                return waiting
+            }
+            for _ in 0..<count { gate.signal() }
+        }
+    }
+
+    struct TimedOut: Error {}
+
+    /// Waits until `condition` holds, looking every 10 ms, for at most ten seconds.
+    @MainActor static func until(_ condition: @MainActor () -> Bool) async throws {
+        let deadline = Date.now.addingTimeInterval(10)
+        while !condition() {
+            guard Date.now < deadline else { throw TimedOut() }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
+    /// A coordinator on `home` that counts Xcode's usual scan, the walk, the runtime listing and the re-proof; the usual
+    /// areas other than Xcode's stay empty and the runtimes and jobs list only `listed`, so nothing outside the sandbox
+    /// is read. `usual` and `walk` hold Xcode's usual scan and the walk.
     @MainActor static func coordinator(_ home: URL, counts: Counts, memory: BorrowerMemory, open: Flag = Flag(false),
-                                       walkDelay: Double = 0) -> CleanupCoordinator {
+                                       settings: CleanupSettings? = nil, usual: Hold = Hold(), walk: Hold = Hold(),
+                                       listed: [CleanupCoordinator.Area: [CleanupCandidate]] = [:], judgeBudget: Duration? = nil) -> CleanupCoordinator {
         var scanning = CleanupCoordinator.Scanning()
         let defaults = scanning
+        if let judgeBudget { scanning.judgeBudget = judgeBudget }
         let inside = home.appending(path: "Library/Developer/Xcode/DerivedData/app-borrower/Build/blob").path
-        scanning.context = { _ in Self.context(home, open: open.value ? [inside] : [], memory: memory) }
+        scanning.context = { ages in Self.context(home, open: open.value ? [inside] : [], memory: memory, ages: ages) }
         scanning.area = { area, context in
-            if area == .runtimes { counts.add("runtimes"); return [] }
-            if area == .jobs { counts.add("jobs"); return [] }
-            return area == .xcode ? XcodeCacheScanner.scan(context) : []
+            if area == .runtimes { counts.add("runtimes"); return listed[.runtimes] ?? [] }
+            if area == .jobs { counts.add("jobs"); return listed[.jobs] ?? [] }
+            guard area == .xcode else { return [] }
+            counts.add("xcode")
+            usual.pass()
+            return XcodeCacheScanner.scan(context)
         }
         scanning.discover = { context in
             counts.add("walk")
-            if walkDelay > 0 { Thread.sleep(forTimeInterval: walkDelay) }
+            walk.pass()
             return defaults.discover(context)
         }
         scanning.reprove = { context, caches in counts.add("reprove"); return defaults.reprove(context, caches) }
-        return CleanupCoordinator(scanning: scanning)
+        return CleanupCoordinator(settings: settings, scanning: scanning)
     }
 
     @MainActor @Test func theLoopsScanNeverWalksListsRuntimesOrReproves() async throws {
@@ -134,18 +235,21 @@ import Testing
         let box = try Sandbox()
         defer { box.remove() }
         let deleting = Flag(true)
+        let walk = Hold(shut: true)
         let coordinator = Self.coordinator(box.root, counts: Counts(), memory: BorrowerMemory(url: box.root.appending(path: "b.json")),
-                                           walkDelay: 0.5)
+                                           walk: walk)
         coordinator.isDeleting = { deleting.value }
         let expanded = Task { await coordinator.scanProjects() }
-        try await Task.sleep(for: .milliseconds(100))
+        await Task.yield()
         let started = Date.now
         await coordinator.settled()
         #expect(Date.now.timeIntervalSince(started) < 1 && coordinator.projectsScannedAt == nil)
         // Once it runs, a run that starts waits for it.
         deleting.value = false
-        try await Task.sleep(for: .milliseconds(400))
-        await coordinator.settled()
+        try await Self.until { walk.held > 0 }
+        let settling = Task { await coordinator.settled() }
+        walk.open()
+        await settling.value
         #expect(coordinator.projectsScannedAt != nil)
         await expanded.value
     }
@@ -195,6 +299,59 @@ import Testing
         #expect(coordinator.lifts.isEmpty)
     }
 
+    /// The dashboard runs both scans at once: a re-proof that lands before the usual Xcode rows still lifts them.
+    @MainActor @Test func aReproofLandingBeforeTheUsualRowsStillLiftsThem() async throws {
+        let f = try BrokenCheckoutTests.make()
+        defer { f.box.remove() }
+        let home = URL(fileURLWithPath: PathGuard.realPath(f.box.root)!)
+        let usual = Hold(shut: true)
+        let coordinator = Self.coordinator(home, counts: Counts(), memory: BorrowerMemory(url: home.appending(path: "support/b.json")),
+                                           usual: usual)
+        let both = Task { await coordinator.scanEverything() }
+        try await Self.until { coordinator.projectsScannedAt != nil }
+        #expect(coordinator.scanning.contains(.xcode))
+        usual.open()
+        await both.value
+        let row = try #require(coordinator.all.first { $0.targets.contains { $0.path.lastPathComponent == "app-borrower" } })
+        #expect(row.isSelectable && row.reproved && row.manualOnly)
+    }
+
+    /// A later dashboard scan whose re-proof lands before the usual Xcode rows shows no lift from the scan before it.
+    @MainActor @Test func aLaterReproofLandingFirstDropsTheLiftsOfTheScanBefore() async throws {
+        let f = try BrokenCheckoutTests.make()
+        defer { f.box.remove() }
+        let home = URL(fileURLWithPath: PathGuard.realPath(f.box.root)!)
+        let usual = Hold()
+        let coordinator = Self.coordinator(home, counts: Counts(), memory: BorrowerMemory(url: home.appending(path: "support/b.json")),
+                                           usual: usual)
+        await coordinator.scanEverything()
+        let first = try #require(coordinator.projectsScannedAt)
+        #expect(!coordinator.lifts.isEmpty)
+        usual.close()
+        let again = Task { await coordinator.scanEverything(force: true) }
+        try await Self.until { coordinator.projectsScannedAt.map { $0 > first } == true }
+        #expect(coordinator.scanning.contains(.xcode) && coordinator.lifts.isEmpty)
+        usual.open()
+        await again.value
+        #expect(!coordinator.lifts.isEmpty)
+    }
+
+    /// Settings changed after the re-proof: its lifts no longer apply to the usual rows a later scan reads.
+    @MainActor @Test func aSettingsChangeAfterTheReproofDropsItsLifts() async throws {
+        let f = try BrokenCheckoutTests.make()
+        defer { f.box.remove() }
+        let home = URL(fileURLWithPath: PathGuard.realPath(f.box.root)!)
+        let settings = CleanupSettings(defaults: nil)
+        let coordinator = Self.coordinator(home, counts: Counts(), memory: BorrowerMemory(url: home.appending(path: "support/b.json")),
+                                           settings: settings)
+        await coordinator.scanEverything()
+        let usual = try #require(coordinator.all.first { $0.targets.contains { $0.path.lastPathComponent == "app-borrower" } })
+        #expect(usual.reproved)
+        settings.set(.buildCache, 3)
+        await coordinator.scan()
+        #expect(coordinator.all.first { $0.id == usual.id }.map { !$0.reproved && $0.verdict.status == .protected } == true)
+    }
+
     @MainActor @Test func aStaleExpandedScanLiftsNothing() async throws {
         let f = try BrokenCheckoutTests.make()
         defer { f.box.remove() }
@@ -223,7 +380,7 @@ import Testing
         let coordinator = Self.coordinator(box.root, counts: Counts(), memory: BorrowerMemory(url: box.root.appending(path: "b.json")))
         await coordinator.scanProjects()
         let row = try #require(coordinator.all.first { $0.targets.first?.path.path == found.path })
-        #expect(row.isSelectable && row.manualOnly)
+        #expect(row.isSelectable && row.isPreselected && !row.isShallow)
         #expect(coordinator.all.first { $0.targets.first?.path.path == sibling.path }?.isSelectable == false)
 
         let executor = fixtureExecutor(roots: [], audit: box.root.appending(path: "audit.jsonl")) { $0.home = box.root }

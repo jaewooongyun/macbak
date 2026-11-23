@@ -244,7 +244,7 @@ enum AIStorageScanner {
         let days = ages.aiJobScratch
         return [
             CleanupCandidate(id: "\(tool.id).jobs-finished", name: "끝난 \(tool.name) 작업의 임시 파일",
-                             detail: "작업 \(finishedCount)개 · \(days)일 넘게 바뀌지 않음 · 최근에 끝난 \(recentCount)개는 제외 · 디스크 화면의 '프로젝트까지 검사'에서 골라 지울 수 있음", symbol: "doc.on.doc",
+                             detail: "작업 \(finishedCount)개 · \(days)일 넘게 바뀌지 않음 · 최근에 끝난 \(recentCount)개는 제외 · 디스크 화면에서 골라 지울 수 있음", symbol: "doc.on.doc",
                              bytes: finished.bytes, evidence: Evidence(verified: true, inUse: false, regenerable: false, userData: true), lowerBound: finished.partial),
             CleanupCandidate(id: "\(tool.id).jobs-running", name: "진행 중인 \(tool.name) 작업", detail: "작업 \(runningCount)개 · 실행 중이거나 입력을 기다리는 중이라 건드리지 않음",
                              symbol: "gearshape.2", bytes: running.bytes, evidence: Evidence(verified: true, inUse: true, regenerable: false), lowerBound: running.partial),

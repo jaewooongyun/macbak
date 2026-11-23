@@ -188,6 +188,32 @@ import Testing
         #expect(FileManager.default.fileExists(atPath: lender.path(percentEncoded: false)))
     }
 
+    /// The dashboard's pre-ticked cache outside the usual places, whose own checkout reads its own mirror and which an
+    /// older version stored as a borrower: still ticked, and the run deletes it by its grant.
+    @MainActor @Test func aPreTickedOutsideCacheReadingItsOwnMirrorIsDeleted() async throws {
+        let w = try Self.world()
+        defer { w.box.remove() }
+        let cache = try Self.cache(w, "dev/app/DerivedData/app-x", workspace: "/nonexistent/App/App.xcodeproj")
+        let file = try Self.borrow(cache, from: cache)
+        try Self.age(w)
+        let edge = BorrowerMemory.Edge(lender: cache.path(percentEncoded: false), borrower: file)
+        w.memory.commit(seen: [edge], gone: [])
+        let coordinator = ProjectDiscoveryTests.coordinator(w.root, counts: ProjectDiscoveryTests.Counts(), memory: w.memory)
+        await coordinator.scanProjects()
+        let row = try #require(coordinator.all.first { $0.targets.first?.path.lastPathComponent == "app-x" })
+        #expect(row.isPreselected && !row.isShallow)
+        // Stored again by an older version still running.
+        w.memory.commit(seen: [edge], gone: [])
+        let memory = w.memory, root = w.root
+        let executor = fixtureExecutor(roots: [], audit: root.appending(path: "audit.jsonl")) {
+            $0.home = root
+            $0.liveBorrowers = { BorrowerMemory.liveBorrowers(of: $0, memory: memory, home: root) }
+        }
+        let latest: @Sendable (String) async -> CleanupCandidate? = { id in await MainActor.run { coordinator.all.first { $0.id == id } } }
+        let report = await executor.run([row], latest: latest) { _ in }
+        #expect(report.deleted.count == 1 && !FileManager.default.fileExists(atPath: cache.path(percentEncoded: false)))
+    }
+
     /// A folder beside the lender whose name differs only in case is another folder on a case-sensitive volume: its
     /// remembered checkout stays a borrower.
     @Test func aBorrowerMatchingOnlyOnceCaseIsFoldedIsKept() throws {

@@ -14,10 +14,18 @@ struct ScanContext: Sendable {
     var ages = CleanupAges()
     /// Where borrowers between build caches are remembered; nil keeps none (tests, snapshots).
     var borrowerMemory: BorrowerMemory?
+    /// When the expanded scan stops judging: every walk and git call it makes ends by then. nil for the usual scan.
+    var deadline: ContinuousClock.Instant?
 }
 
 enum ScanSupport {
     static let minimumBytes: Int64 = 1_048_576
+
+    /// `fixed`, cut to what is left before `deadline` and zero once it has passed; `fixed` alone without one.
+    static func budget(_ fixed: Duration, until deadline: ContinuousClock.Instant?, clock: ContinuousClock = ContinuousClock()) -> Duration {
+        guard let deadline else { return fixed }
+        return max(.zero, min(fixed, deadline - clock.now))
+    }
 
     /// The folder with every link resolved, which is the form the path guard accepts; nil when it does not exist.
     /// - Important: nil also when the folder is reached through a link (say `~/Library/Caches` pointing elsewhere), so a
