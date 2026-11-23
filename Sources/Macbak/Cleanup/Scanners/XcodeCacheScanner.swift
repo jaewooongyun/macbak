@@ -37,6 +37,16 @@ enum XcodeCacheScanner {
         }
     }
 
+    /// The build caches in the usual places, Xcode's and XcodeBuildMCP's, without the shared compiler caches.
+    static func standardCaches(_ home: URL) -> [URL] {
+        var caches: [URL] = []
+        if let root = ScanSupport.resolved(home, "Library/Developer/Xcode/DerivedData") { caches += ScanSupport.children(of: root) ?? [] }
+        if let root = ScanSupport.resolved(home, "Library/Developer/XcodeBuildMCP/workspaces") {
+            for workspace in ScanSupport.children(of: root) ?? [] { caches += ScanSupport.children(of: workspace.appending(path: "DerivedData")) ?? [] }
+        }
+        return caches.filter { !sharedNames.contains($0.lastPathComponent) }
+    }
+
     private static func scan(_ context: ScanContext, reproving: Set<String>?, reprove: Bool) -> [CleanupCandidate] {
         // First list what to look at (cheap), then walk it all at once (the slow part).
         var found: [(item: URL, root: URL, label: String, workspace: String?)] = []

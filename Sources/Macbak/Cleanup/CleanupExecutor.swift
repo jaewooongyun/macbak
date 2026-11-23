@@ -69,6 +69,10 @@ actor CleanupExecutor {
         var currentAges: @Sendable () -> CleanupAges = { CleanupAges() }
         /// Alternates files that read package objects from inside this build cache now, read again at the moment asked.
         var liveBorrowers: @Sendable (String) -> [String] = { _ in [] }
+        /// The home a granted folder must sit inside (`PathGuard.checkExact`).
+        var home = FileManager.default.homeDirectoryForCurrentUser
+        /// The judge of a granted folder: the scan row's, asked again before the delete and before a retry.
+        var judgeGrant: ProjectOutputScanner.Judge = TargetGrant.evaluate
 
         static func live() -> Dependencies {
             let home = FileManager.default.homeDirectoryForCurrentUser
@@ -247,11 +251,9 @@ actor CleanupExecutor {
         for target in candidate.targets {
             switch target.action {
             case .removeItem:
+                if let refusal = grantRefusal(target, candidate: candidate) { return refusal }
                 if open.anyOpen(under: target.path.path(percentEncoded: false)) { return "지금 쓰는 파일이 있습니다" }
-                if let refusal = PathGuard.check(target.path, inside: target.root, identity: target.identity, allowedRoots: roots,
-                                                 forbidden: dependencies.forbidden, mounts: mounts) {
-                    return Self.describe(refusal)
-                }
+                if let refusal = pathRefusal(target, candidate: candidate, roots: roots, mounts: mounts) { return refusal }
                 if shallow, let refusal = Self.deepRefusal(target.path) { return refusal }
                 // A borrower in this same row goes first (the scan orders it so); any other one keeps the cache.
                 let others = borrowers(of: target.path).filter { file in
@@ -303,18 +305,18 @@ actor CleanupExecutor {
                     guard let before = openFiles() else { firstError = firstError ?? "열린 파일을 확인하지 못했습니다"; break }
                     if let refusal = await ownerRefusal(candidate, open: before, tools: shallow) { firstError = firstError ?? refusal; break }
                 }
+                if let refusal = grantRefusal(target, candidate: candidate) { firstError = firstError ?? refusal; break }
                 // A borrower that still reads from it, this row's included if it is not gone yet; read before the open
                 // files, since it reads every build cache's alternates files.
                 if !borrowers(of: target.path).isEmpty { firstError = firstError ?? Self.lenderRefusal; break }
                 guard let open = openFiles() else { firstError = firstError ?? "열린 파일을 확인하지 못했습니다"; break }
                 if open.anyOpen(under: target.path.path(percentEncoded: false)) { firstError = firstError ?? "지금 쓰는 파일이 있습니다"; break }
                 if Self.workspaceOpen(candidate, open) { firstError = firstError ?? "작업 공간에서 쓰는 파일이 있습니다"; break }
-                if let refusal = PathGuard.check(target.path, inside: target.root, identity: target.identity, allowedRoots: roots,
-                                                 forbidden: dependencies.forbidden, mounts: mounts) {
-                    firstError = firstError ?? Self.describe(refusal)
+                if let refusal = pathRefusal(target, candidate: candidate, roots: roots, mounts: mounts) {
+                    firstError = firstError ?? refusal
                     break
                 }
-                // Settings changed during the slow checks leave the row judged by old ages.
+                // Settings changed during the slow checks (a grant's walk) leave the row judged by old ages.
                 if agesChanged(candidate) { firstError = firstError ?? Self.agesRefusal; break }
             }
             switch target.action {
@@ -324,12 +326,12 @@ actor CleanupExecutor {
                 let check = { () async -> Bool in
                     if self.agesChanged(candidate) { return false }
                     if shallow, Self.deepRefusal(target.path) != nil { return false }
+                    if self.grantRefusal(target, candidate: candidate) != nil { return false }
                     guard self.borrowers(of: target.path).isEmpty,
                           let before = self.openFiles(fresh: true), await self.ownerRefusal(candidate, open: before) == nil,
                           let open = self.openFiles(), !open.anyOpen(under: target.path.path(percentEncoded: false)),
                           !Self.workspaceOpen(candidate, open) else { return false }
-                    return PathGuard.check(target.path, inside: target.root, identity: target.identity, allowedRoots: roots,
-                                           forbidden: self.dependencies.forbidden, mounts: mounts) == nil
+                    return self.pathRefusal(target, candidate: candidate, roots: roots, mounts: mounts) == nil
                         && !self.agesChanged(candidate)
                 }
                 if let error = await remove(target.path, recheck: check) { firstError = firstError ?? error } else { removed += 1 }
@@ -377,6 +379,28 @@ actor CleanupExecutor {
             if candidate.guards.toolIDs.contains(where: running.contains) { return "AI 도구가 실행 중입니다" }
         }
         return nil
+    }
+
+    /// The path guard right before a folder goes, the same at the row's up-front check, before the delete and before a
+    /// retry: fast, so nothing slow sits between it and the deletion. A granted folder outside every allowed root gets
+    /// its exact check.
+    private func pathRefusal(_ target: CleanupTarget, candidate: CleanupCandidate, roots: [URL], mounts: [String]?) -> String? {
+        guard let grant = target.grant else {
+            return PathGuard.check(target.path, inside: target.root, identity: target.identity, allowedRoots: roots,
+                                   forbidden: dependencies.forbidden, mounts: mounts).map(Self.describe)
+        }
+        return PathGuard.checkExact(target.path, grant: grant.path, identity: target.identity, home: dependencies.home,
+                                    forbidden: dependencies.forbidden, mounts: mounts).map(Self.describe)
+    }
+
+    /// A granted folder's grant judged again, by the function its scan row was judged by, with the ages Settings hold now;
+    /// nil for a folder without one.
+    /// - Important: It walks the folder (up to a minute) and may ask git, so it runs with the slow questions, before the
+    ///   open files and the path guard are taken again.
+    private func grantRefusal(_ target: CleanupTarget, candidate: CleanupCandidate) -> String? {
+        guard let grant = target.grant else { return nil }
+        return dependencies.judgeGrant(grant, .init(now: .now, ages: dependencies.currentAges(), open: openFiles(),
+                                                    borrowers: borrowers(of: target.path), reprove: candidate.reproved, home: dependencies.home)).refusal
     }
 
     static let agesRefusal = "정리 기준이 바뀌어 다시 검사해야 합니다"
@@ -458,6 +482,7 @@ actor CleanupExecutor {
         case .containsMount: "다른 볼륨이 연결돼 있습니다"
         case .identityChanged: "검사 뒤에 바뀌었습니다"
         case .rootIsLinked: "정리 위치가 링크입니다"
+        case .notGranted: "검사가 허가한 폴더가 아닙니다"
         }
     }
 

@@ -8,7 +8,12 @@ import Observation
 @Observable
 final class CleanupCoordinator {
     enum Area: String, CaseIterable, Sendable {
-        case xcode, appCaches, devices, general
+        case xcode, appCaches, devices, general, projects, jobs
+
+        /// What `scan()` reads: the loop, the menu and the dashboard.
+        static let regular: [Area] = [.xcode, .appCaches, .devices, .general]
+        /// What only `scanProjects()` reads: slow, or outside the usual places.
+        static let expanded: [Area] = [.projects, .jobs]
 
         var title: String {
             switch self {
@@ -16,6 +21,8 @@ final class CleanupCoordinator {
             case .appCaches: "앱 캐시·로그"
             case .devices: "기기 지원·시뮬레이터"
             case .general: "개발 도구·기타 캐시"
+            case .projects: "프로젝트 안 빌드 캐시"
+            case .jobs: "끝난 AI 작업 임시 파일"
             }
         }
     }
@@ -24,6 +31,20 @@ final class CleanupCoordinator {
     struct Scanning: Sendable {
         var area: @Sendable (Area, ScanContext) -> [CleanupCandidate] = { CleanupCoordinator.scan($0, $1) }
         var context: @MainActor @Sendable (CleanupAges) async -> ScanContext = { await CleanupCoordinator.liveContext(ages: $0) }
+        /// The expanded scan's walk of the home.
+        var discover: @Sendable (ScanContext) -> ProjectDiscovery.Result = { ProjectDiscovery.walk(home: $0.home) }
+        /// The usual build-cache rows of the workspaces holding these caches, their package checkouts proven again.
+        /// - Important: The only place that turns re-proving on; the loop and the menu never reach it.
+        var reprove: @Sendable (ScanContext, Set<String>) -> [CleanupCandidate] = { XcodeCacheScanner.scan($0, only: $1, reprove: true) }
+    }
+
+    /// What the expanded scan proved of a usual build-cache row: its alarm cleared by re-proving its package checkouts.
+    /// Applied to the usual row only while it still has these targets, this last use and this protection, so a later
+    /// usual scan that finds it open, recently used or protected otherwise wins.
+    struct ReproofLift: Equatable, Sendable {
+        let targets: [CleanupTarget]
+        let lastUsed: Date?
+        let reason: String
     }
 
     private(set) var candidates: [Area: [CleanupCandidate]] = [:]
@@ -32,6 +53,12 @@ final class CleanupCoordinator {
     /// The ages the latest finished scan judged by.
     private(set) var scannedAges: CleanupAges?
     private(set) var generation = 0
+    /// When the latest expanded scan started; nil before one, or when Settings changed while it read.
+    private(set) var projectsScannedAt: Date?
+    /// What the latest expanded scan's walk skipped and whether it finished.
+    private(set) var discovery: ProjectDiscovery.Result?
+    /// Usual rows the expanded scan proved again, by id; dropped once that scan is older than the result lifetime.
+    private(set) var lifts: [String: ReproofLift] = [:]
     /// The ages picked in Settings; nil keeps the defaults.
     let settings: CleanupSettings?
     @ObservationIgnored private let sources: Scanning
@@ -39,6 +66,8 @@ final class CleanupCoordinator {
     private let scansDisk: Bool
     /// The scan in progress, which later callers wait for.
     @ObservationIgnored private var current: Task<Void, Never>?
+    /// The expanded scan in progress, likewise.
+    @ObservationIgnored private var projectsTask: Task<Void, Never>?
     /// Looks at the rows the rules could not tell, after each scan.
     let explorer: CacheExplorer
     /// Whether a clean-up is deleting now. A scan waits for it to finish, so no new hold or verdict lands on rows a run
@@ -62,7 +91,26 @@ final class CleanupCoordinator {
     }
 
     var ages: CleanupAges { settings?.ages ?? CleanupAges() }
-    var all: [CleanupCandidate] { Area.allCases.flatMap { candidates[$0] ?? [] } }
+    var all: [CleanupCandidate] { Area.allCases.flatMap(rows(in:)) }
+
+    /// An area's rows as screens and runs see them: a usual build-cache row the expanded scan proved again, while that
+    /// scan is fresh and the row is unchanged, is a choice only (`manualOnly`, `reproved`) instead of protected.
+    func rows(in area: Area) -> [CleanupCandidate] {
+        let rows = candidates[area] ?? []
+        guard area == .xcode, !lifts.isEmpty,
+              let at = projectsScannedAt, Date.now.timeIntervalSince(at) <= CleanupCandidate.resultLifetime else { return rows }
+        return rows.map { row in
+            guard let lift = lifts[row.id], lift.targets == row.targets, lift.lastUsed == row.lastUsed,
+                  row.evidence.protectedReason == lift.reason else { return row }
+            var evidence = row.evidence
+            evidence.protectedReason = nil
+            var lifted = row.with(evidence: evidence, aiEvidence: row.aiEvidence)
+            lifted.manualOnly = true
+            lifted.reproved = true
+            lifted.trusted = false
+            return lifted
+        }
+    }
     /// No scan yet, the last one is older than the result lifetime, or it judged by ages Settings no longer hold.
     var isStale: Bool {
         scansDisk && (scannedAt.map { Date.now.timeIntervalSince($0) > CleanupCandidate.resultLifetime } ?? true || scannedAges != ages)
@@ -85,11 +133,29 @@ final class CleanupCoordinator {
         await task.value
     }
 
+    /// The expanded scan, for the dashboard's "프로젝트까지 검사" and `--scan-report` only — never the loop or the menu.
+    /// Its rows stay until the next expanded scan; each carries its own scan time, which the executor ages like any row.
+    func scanProjects() async {
+        while isDeleting() {
+            do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
+        }
+        guard scansDisk else { return }
+        if let projectsTask { return await projectsTask.value }
+        let task = Task { [self] in
+            // Shown before the open-files snapshot the context takes, which takes seconds.
+            scanning.formUnion(Area.expanded)
+            await scanExpanded(context: await sources.context(ages))
+            projectsTask = nil
+        }
+        projectsTask = task
+        await task.value
+    }
+
     private func scanAll() async {
         explorer.cancel()
-        scanning = Set(Area.allCases)
+        scanning.formUnion(Area.regular)
         let context = await sources.context(ages)
-        await scanAreas(Area.allCases, context: context)
+        await scanAreas(Area.regular, context: context)
         generation += 1
         // Settings changed while it read: its rows were judged by other ages, so the result stays stale and the
         // executor refuses its rows. A later scan, not this one, makes it current.
@@ -116,6 +182,62 @@ final class CleanupCoordinator {
                 scanning.remove(area)
             }
         }
+    }
+
+    /// Finished jobs; and the walk, the build caches it found judged with the usual ones' borrowers, and the usual ones whose
+    /// package checkouts only a re-proof can clear. Off the main actor in task-group children, as `scanAreas`.
+    private func scanExpanded(context: ScanContext) async {
+        enum Part: Sendable {
+            case jobs([CleanupCandidate])
+            case projects([CleanupCandidate], ProjectDiscovery.Result, reproved: [CleanupCandidate])
+        }
+        let sources = sources
+        await withTaskGroup(of: Part.self) { group in
+            group.addTask(priority: .utility) { .jobs(sources.area(.jobs, context)) }
+            group.addTask(priority: .utility) {
+                let discovery = sources.discover(context)
+                let standard = XcodeCacheScanner.standardCaches(context.home)
+                let lending = XcodeCacheScanner.lendingMap(caches: standard + discovery.derivedData, memory: context.borrowerMemory)
+                let rows = ProjectOutputScanner.rows(discovery.derivedData, context: context, lending: lending, reprove: true)
+                    + ProjectOutputScanner.artifactRows(discovery.artifacts, context: context)
+                    + ProjectOutputScanner.nodeModulesRows(discovery.nodeModules, context: context)
+                // Both sides resolved: listed folders end in "/", resolved ones do not.
+                let key = { (url: URL) in PathKey.fold(PathGuard.realPath(url) ?? url.path(percentEncoded: false)) }
+                let usual = Set(standard.map(key))
+                let broken = lending.broken.filter { usual.contains(key(URL(fileURLWithPath: $0))) }
+                return .projects(rows, discovery, reproved: broken.isEmpty ? [] : sources.reprove(context, broken))
+            }
+            for await part in group {
+                switch part {
+                case .jobs(let rows):
+                    candidates[.jobs] = Self.stamped(rows, context)
+                    scanning.remove(.jobs)
+                case .projects(let rows, let found, let reproved):
+                    candidates[.projects] = Self.stamped(rows, context)
+                    discovery = found
+                    lifts = Self.lifts(reproved, usual: candidates[.xcode] ?? [])
+                    scanning.remove(.projects)
+                }
+            }
+        }
+        // Settings changed while it read: as for the usual scan, its rows stay stale and its lifts are not applied.
+        guard context.ages == ages else {
+            projectsScannedAt = nil
+            lifts = [:]
+            return
+        }
+        projectsScannedAt = context.now
+    }
+
+    /// A re-proven row that a person may pick where the usual row with the same targets and last use is protected.
+    nonisolated static func lifts(_ reproved: [CleanupCandidate], usual: [CleanupCandidate]) -> [String: ReproofLift] {
+        var lifts: [String: ReproofLift] = [:]
+        for row in reproved where row.isSelectable {
+            guard let before = usual.first(where: { $0.id == row.id }), !before.isSelectable, before.targets == row.targets,
+                  before.lastUsed == row.lastUsed, let reason = before.evidence.protectedReason else { continue }
+            lifts[row.id] = ReproofLift(targets: before.targets, lastUsed: before.lastUsed, reason: reason)
+        }
+        return lifts
     }
 
     nonisolated static func stamped(_ rows: [CleanupCandidate], _ context: ScanContext) -> [CleanupCandidate] {
@@ -153,6 +275,7 @@ final class CleanupCoordinator {
     /// Waits for a scan in progress, so a run starts on settled verdicts.
     func settled() async {
         if let current { await current.value }
+        if let projectsTask { await projectsTask.value }
     }
 
     /// Puts what the on-device model saw on its row, in whichever area it is.
@@ -202,6 +325,7 @@ final class CleanupCoordinator {
     /// Drops rows a clean-up deleted, so lists are right without a full rescan.
     func forget(_ ids: Set<String>) {
         for area in Area.allCases { candidates[area]?.removeAll { ids.contains($0.id) } }
+        for id in ids { lifts.removeValue(forKey: id) }
     }
 
     nonisolated static func scan(_ area: Area, _ context: ScanContext) -> [CleanupCandidate] {
@@ -210,6 +334,9 @@ final class CleanupCoordinator {
         case .appCaches: AppCacheScanner.scan(context)
         case .devices: DeveloperDeviceScanner.scan(context)
         case .general: GeneralCacheScanner.scan(context)
+        // Made by `scanProjects()` from its walk, which also feeds the borrower map; never scanned on its own.
+        case .projects: []
+        case .jobs: JobScratchScanner.scan(context)
         }
     }
 

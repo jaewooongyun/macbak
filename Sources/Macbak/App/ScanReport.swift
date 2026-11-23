@@ -15,6 +15,7 @@ enum ScanReport {
         var finished = false
         Task {
             await coordinator.scan()
+            await coordinator.scanProjects()
             await ai.wake()
             await storage.scan(using: ai)
             finished = true
@@ -42,8 +43,14 @@ enum ScanReport {
         let untrusted = rows.filter { $0.isPreselected && !$0.trusted }
         print("ticked in the dashboard only: \(untrusted.count) · \(untrusted.reduce(0) { $0 + $1.bytes }.diskText)")
 
+        print("")
+        for line in lines(Summary(projects: coordinator.rows(in: .projects), jobs: coordinator.rows(in: .jobs),
+                                  discovery: coordinator.discovery, standardCaches: XcodeCacheScanner.standardCaches(FileManager.default.homeDirectoryForCurrentUser).count,
+                                  memory: BorrowerMemory.live().load(), lifts: coordinator.lifts.count)) {
+            print(line)
+        }
         for area in CleanupCoordinator.Area.allCases {
-            let found = coordinator.candidates[area] ?? []
+            let found = coordinator.rows(in: area)
             print("\n== \(area.title): \(found.count)")
             for status in CleanupStatus.allCases {
                 let rows = found.filter { $0.verdict.status == status }
@@ -73,7 +80,15 @@ enum ScanReport {
         // Simulators are deleted with `simctl delete`, which the path guard never sees.
         let unreachable = rows.filter(\.isSelectable).filter { row in
             row.targets.contains { target in
-                if case .deleteSimulator = target.action { return false }
+                switch target.action {
+                case .deleteSimulator: return false
+                case .removeItem, .removeFiles: break
+                }
+                // A granted folder has no root: the executor checks exactly it, below the home.
+                if let grant = target.grant {
+                    return PathGuard.checkExact(target.path, grant: grant.path, identity: target.identity, home: home,
+                                                forbidden: CleanupRoots.forbidden(home: home), mounts: PathGuard.mountPoints()) != nil
+                }
                 return PathGuard.realPath(target.root).map { !allowed.contains($0) } ?? true
             }
         }
@@ -90,5 +105,44 @@ enum ScanReport {
         print("shallow rows a run would skip now: \(skipped.count)")
         for row in skipped { print("  \(row.id)\t\(row.refusal ?? "")") }
         exit(0)
+    }
+
+    /// What the expanded scan found, for the report's summary.
+    struct Summary {
+        var projects: [CleanupCandidate]
+        var jobs: [CleanupCandidate]
+        var discovery: ProjectDiscovery.Result?
+        /// The usual build cache folders the lending map read besides the ones the walk found.
+        var standardCaches: Int
+        var memory: BorrowerMemory.State
+        var lifts: Int
+    }
+
+    /// One line per area and state: counts only, never a row's name or path.
+    nonisolated static func lines(_ summary: Summary) -> [String] {
+        func count(_ title: String, _ rows: [CleanupCandidate]) -> String {
+            "\(title): \(rows.count)줄 · 고를 수 있음 \(rows.filter(\.isSelectable).count)"
+        }
+        let projects = summary.projects
+        var lines = [
+            count("프로젝트 · Xcode 빌드 캐시", projects.filter { $0.id.hasPrefix("project.derivedData.") }),
+            count("프로젝트 · git 이 무시하는 빌드 산출물", projects.filter { $0.id.hasPrefix("project.artifact.") }),
+            count("프로젝트 · node_modules", projects.filter { $0.id.hasPrefix("project.nodeModules.") }),
+            count("끝난 AI 작업 임시 파일", summary.jobs),
+        ]
+        if let discovery = summary.discovery {
+            lines.append("확장 탐색: 폴더 \(discovery.visited)개 · " + (discovery.partial ? "부분 탐색(예산 소진)" : "끝까지 탐색"))
+            lines.append("검사하지 않은 곳: " + (discovery.skipped.isEmpty ? "없음" : discovery.skipped.joined(separator: " · ")))
+            lines.append("차용 지도 범위: 표준 빌드 캐시 \(summary.standardCaches)곳 + 찾은 빌드 캐시 \(discovery.derivedData.count)곳")
+        } else {
+            lines.append("확장 탐색: 하지 않음")
+        }
+        switch summary.memory {
+        case .none: lines.append("차용 기억: 없음")
+        case .corrupt: lines.append("차용 기억: 손상")
+        case .edges(let edges): lines.append("차용 기억: 정상 · 연결 \(edges.count)개")
+        }
+        lines.append("다시 증명한 보통 줄: \(summary.lifts)개")
+        return lines
     }
 }

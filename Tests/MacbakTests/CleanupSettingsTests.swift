@@ -23,7 +23,7 @@ import Testing
         let ages = CleanupSettings(defaults: defaults()).ages
         #expect(ages.buildCache == 1 && ages.appCache == 3 && ages.general == 3 && ages.logs == 30)
         #expect(ages.deviceSupportProtect == 3 && ages.deviceSupportShallow == 14 && ages.simulatorQuiet == 5)
-        #expect(ages.aiChatLogs == 90 && ages.aiJobScratch == 7)
+        #expect(ages.aiChatLogs == 90 && ages.aiJobScratch == 7 && ages.nodeModules == 60)
         #expect(ages == CleanupAges())
     }
 

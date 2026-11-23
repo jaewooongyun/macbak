@@ -88,6 +88,8 @@ struct JobStore: Sendable {
     var finished: Set<String> = ["done"]
     /// Scratch files inside each job folder.
     var scratch = "tmp"
+    /// Where the tool keeps one file per live session (`*.json`, naming its job as `jobId`), relative to the home.
+    var sessions: String?
 
     /// Running or waiting: its files are still in use.
     func isAlive(_ state: String?) -> Bool {
@@ -150,7 +152,7 @@ extension AITool {
         id: "claude-code", name: "Claude Code", vendor: .anthropic, symbol: "terminal",
         process: ProcessRule(names: ["claude", "claude.exe"], installPaths: ["/@anthropic-ai/claude-code/"], sessions: .argv0("claude")),
         sessions: SessionLog(root: ".claude/projects", fileExtension: "jsonl", layout: .perProject()),
-        jobs: JobStore(root: ".claude/jobs"),
+        jobs: JobStore(root: ".claude/jobs", sessions: ".claude/sessions"),
         footprint: [.home(".claude"), .home("Library/Caches/claude-cli-nodejs")],
         cleanable: [
             StorageArea(id: "mcp-logs", name: "오래된 MCP 서버 로그", symbol: "doc.text",

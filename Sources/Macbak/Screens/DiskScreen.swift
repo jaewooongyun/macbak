@@ -96,6 +96,7 @@ struct DiskScreen: View {
                 LegendRow(.blue.opacity(0.45), striped: true, title: "고른 항목", value: projected.diskText, note: "폴더 크기 합계 · 실제로 늘어나는 공간은 더 작을 수 있음")
                 LegendRow(.quaternary, title: "사용 가능", value: disk.available.diskText, note: "\(disk.purgeable.diskText)는 macOS가 필요할 때 비움")
             }
+            discoveryNote
         }
     }
 
@@ -112,6 +113,30 @@ struct DiskScreen: View {
             }
             Button("다시 검사", action: rescan)
                 .glassAction()
+            Button("프로젝트까지 검사", action: scanProjects)
+                .glassAction()
+                .help("홈 폴더의 프로젝트 안 Xcode 캐시까지 찾습니다. 1분 남짓 걸리고, 찾은 항목은 직접 골라야만 지웁니다.")
+        }
+    }
+
+    /// What the latest expanded scan did not look at, and whether its walk ran out of time.
+    @ViewBuilder
+    private var discoveryNote: some View {
+        if let discovery = cleanup.discovery, cleanup.scanning.isDisjoint(with: CleanupCoordinator.Area.expanded) {
+            Text((discovery.partial ? "프로젝트 검사는 시간이 다 돼 일부만 봤습니다. " : "") + "검사하지 않은 곳: " + discovery.skipped.joined(separator: " · "))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .help(discovery.skipped.joined(separator: "\n"))
+        }
+    }
+
+    /// The usual scan first, so the expanded one judges against fresh rows; then the walk and re-proofs.
+    private func scanProjects() {
+        system.refreshAll()
+        Task {
+            await cleanup.scan()
+            await cleanup.scanProjects()
         }
     }
 

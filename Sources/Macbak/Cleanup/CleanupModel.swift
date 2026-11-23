@@ -18,6 +18,8 @@ struct CleanupTarget: Hashable, Sendable {
     let root: URL
     let identity: FileIdentity?
     let action: Action
+    /// Set for a folder outside every allowed root: deleted only as exactly this folder, after the grant is judged again.
+    var grant: TargetGrant?
 }
 
 /// What else, besides its own files, must be idle when a row is deleted. The executor checks these again right before.

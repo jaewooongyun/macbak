@@ -8,7 +8,7 @@ import Observation
 struct CleanupAges: Equatable, Sendable {
     enum Item: String, CaseIterable, Sendable {
         case buildCache, appCache, general, logs, deviceSupportProtect, deviceSupportShallow, simulatorQuiet
-        case aiChatLogs, aiJobScratch
+        case aiChatLogs, aiJobScratch, nodeModules
 
         var title: String {
             switch self {
@@ -21,6 +21,7 @@ struct CleanupAges: Equatable, Sendable {
             case .simulatorQuiet: "시뮬레이터 미리 체크"
             case .aiChatLogs: "AI 대화 기록"
             case .aiJobScratch: "끝난 AI 작업 임시 파일"
+            case .nodeModules: "오래 안 쓴 프로젝트의 node_modules"
             }
         }
 
@@ -34,6 +35,7 @@ struct CleanupAges: Equatable, Sendable {
             case .simulatorQuiet: [3, 5, 7, 14, 30]
             case .aiChatLogs: [30, 60, 90, 180, 365]
             case .aiJobScratch: [3, 7, 14, 30]
+            case .nodeModules: [30, 60, 90, 180]
             }
         }
 
@@ -51,6 +53,7 @@ struct CleanupAges: Equatable, Sendable {
     var simulatorQuiet = 5
     var aiChatLogs = 90
     var aiJobScratch = 7
+    var nodeModules = 60
 
     subscript(item: Item) -> Int {
         get {
@@ -64,6 +67,7 @@ struct CleanupAges: Equatable, Sendable {
             case .simulatorQuiet: simulatorQuiet
             case .aiChatLogs: aiChatLogs
             case .aiJobScratch: aiJobScratch
+            case .nodeModules: nodeModules
             }
         }
         set {
@@ -77,6 +81,7 @@ struct CleanupAges: Equatable, Sendable {
             case .simulatorQuiet: simulatorQuiet = newValue
             case .aiChatLogs: aiChatLogs = newValue
             case .aiJobScratch: aiJobScratch = newValue
+            case .nodeModules: nodeModules = newValue
             }
         }
     }

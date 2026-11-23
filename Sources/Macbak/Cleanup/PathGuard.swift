@@ -79,6 +79,8 @@ enum PathGuard {
         case identityChanged
         /// The root itself resolves somewhere other than where it is written: a link would vouch for another folder.
         case rootIsLinked
+        /// Not the exact folder its grant names.
+        case notGranted
     }
 
     /// - Parameters:
@@ -106,17 +108,37 @@ enum PathGuard {
         guard !targetParts.contains(where: { $0 == "." || $0 == ".." }),
               targetParts.count >= rootParts.count, zip(rootParts, targetParts).allSatisfy(==) else { return .notInsideRoot }
         guard targetParts.count > rootParts.count else { return .isRoot }
+        return below(rootPath, rootParts.count, targetParts, identity: identity, forbidden: forbidden, mounts: mounts)
+    }
 
-        // No component below the root may be a link: a link anywhere on the way could lead outside it.
-        var path = rootPath
-        for part in targetParts[rootParts.count...] {
+    /// For one folder outside every allowed root that the expanded scan found and judged by itself (`TargetGrant`): only
+    /// that exact folder, inside the home, with no link from the home down to it, neither forbidden nor company security
+    /// software anywhere on its path below the home, the same item as when scanned, and no volume mounted inside.
+    /// - Important: The parent never becomes a root, so nothing beside, above or below the granted folder goes through it.
+    static func checkExact(_ target: URL, grant: URL, identity: FileIdentity?, home: URL, forbidden: [URL], mounts: [String]?) -> Refusal? {
+        let targetParts = components(target.path(percentEncoded: false))
+        guard targetParts == components(grant.path(percentEncoded: false)) else { return .notGranted }
+        guard let homePath = realPath(home) else { return .unreadable(home.lastPathComponent) }
+        guard isTrusted(home, resolvedTo: homePath) else { return .rootIsLinked }
+        let homeParts = components(homePath)
+        guard !targetParts.contains(where: { $0 == "." || $0 == ".." }), targetParts.count > homeParts.count,
+              zip(homeParts, targetParts).allSatisfy(==) else { return .notInsideRoot }
+        return below(homePath, homeParts.count, targetParts, identity: identity, forbidden: forbidden, mounts: mounts)
+    }
+
+    /// The checks both share, from a trusted base folder down to the target.
+    private static func below(_ basePath: String, _ baseCount: Int, _ targetParts: [String], identity: FileIdentity?, forbidden: [URL],
+                              mounts: [String]?) -> Refusal? {
+        // No component below the base may be a link: a link anywhere on the way could lead outside it.
+        var path = basePath
+        for part in targetParts[baseCount...] {
             path += "/" + part
             var info = stat()
             guard lstat(path, &info) == 0 else { return .unreadable(part) }
             if info.st_mode & S_IFMT == S_IFLNK { return .symbolicLink(part) }
         }
 
-        if CleanupRoots.isManagedSoftware(targetParts.dropFirst(rootParts.count).joined(separator: "/")) { return .forbidden }
+        if CleanupRoots.isManagedSoftware(targetParts.dropFirst(baseCount).joined(separator: "/")) { return .forbidden }
         let targetKey = targetParts.map(PathKey.fold)
         for kept in forbidden {
             let keptKey = components(realPath(kept) ?? kept.path(percentEncoded: false)).map(PathKey.fold)
@@ -165,5 +187,89 @@ enum PathGuard {
 
     private static func isPrefix(_ prefix: [String], of path: [String]) -> Bool {
         prefix.count <= path.count && zip(prefix, path).allSatisfy(==)
+    }
+}
+
+/// One folder outside every allowed root that the expanded scan found and judged by itself. The executor deletes exactly
+/// it through `PathGuard.checkExact`, after `evaluate` passes again.
+/// - Important: `evaluate` is the only judge: the scan's row, `--scan-report`, the executor's first delete and its retry
+///   all call it, so what the row promised is what the deletion checks.
+struct TargetGrant: Hashable, Sendable {
+    enum Kind: Hashable, Sendable {
+        /// An Xcode build cache outside the usual places: an `info.plist` naming a workspace, and `Build` or `SourcePackages`.
+        case derivedData
+        /// A build output git ignores whole in `project`, named in `ProjectDiscovery.outputs` with its marker present.
+        case projectArtifact(project: URL)
+        /// The `node_modules` beside a `package.json`, of a project left alone longer than the Settings age.
+        case nodeModules
+        /// A finished AI job's scratch folder: exactly `<jobs>/<id>/<scratch>` of a catalog tool's job store.
+        case jobScratch
+    }
+
+    let kind: Kind
+    let path: URL
+
+    /// What `evaluate` reads besides the folder.
+    struct Inputs {
+        var now: Date
+        var ages: CleanupAges
+        /// nil when `lsof` failed: then nothing counts as unused.
+        var open: OpenFiles?
+        /// Files elsewhere that read package objects from inside the folder now.
+        var borrowers: [String]
+        /// Whether a package checkout that borrowed its objects from a deleted cache may be proven again from this one.
+        var reprove: Bool
+        /// The home, for the cache rules' keep list; nil skips them.
+        var home: URL?
+        /// Reads a file the judge must look inside; the only way it opens one, so a test can see what it reads.
+        var read: @Sendable (URL) -> Data? = { try? Data(contentsOf: $0) }
+    }
+
+    /// Why the folder may not be deleted now, or nil; and the walk, for the row's size and last use.
+    static func evaluate(_ grant: TargetGrant, _ inputs: Inputs) -> (refusal: String?, facts: TreeFacts) {
+        switch grant.kind {
+        case .derivedData:
+            let folder = grant.path
+            let facts = TreeWalk.inspect(folder, budget: .seconds(120), alarm: { CacheRules.isAlarmName($0, isFolder: $1, reprove: inputs.reprove) })
+            guard let workspace = XcodeCacheScanner.workspacePath(of: folder) else { return ("작업 공간 기록을 읽지 못했습니다", facts) }
+            let has = { (name: String) in FileManager.default.fileExists(atPath: folder.appending(path: name).path(percentEncoded: false)) }
+            guard has("Build") || has("SourcePackages") else { return ("Xcode 빌드 캐시 모양이 아닙니다", facts) }
+            if let alarm = facts.alarm { return (CacheRules.alarmReason(alarm), facts) }
+            guard let idle = facts.idle(at: inputs.now) else { return ("다 훑지 못해 마지막 사용 시각을 모릅니다", facts) }
+            if idle < inputs.ages.seconds(.buildCache) { return ("최근에 썼습니다.", facts) }
+            guard let open = inputs.open else { return ("열린 파일을 확인하지 못했습니다", facts) }
+            let project = URL(fileURLWithPath: workspace).deletingLastPathComponent().path(percentEncoded: false)
+            if open.anyOpen(under: folder.path(percentEncoded: false)) || open.anyOpen(under: project) { return ("지금 쓰는 파일이 있습니다", facts) }
+            if !inputs.borrowers.isEmpty { return ("다른 캐시가 이 캐시의 패키지 기록을 빌려 씁니다", facts) }
+            return (nil, facts)
+        case .projectArtifact(let project):
+            let folder = grant.path
+            let facts = TreeWalk.inspect(folder, budget: .seconds(60), alarm: CacheRules.isAlarmName)
+            guard ProjectDiscovery.hasMarker(folder.lastPathComponent, project: project, folder: folder) else {
+                return ("이 이름을 만드는 도구의 프로젝트 파일이 없습니다", facts)
+            }
+            switch Git.isIgnored(folder, project: project) {
+            case nil: return ("git으로 확인하지 못했습니다", facts)
+            case false?: return ("git이 추적하거나 무시하지 않는 폴더입니다", facts)
+            case true?: break
+            }
+            // Relative to the home where the rules can read it, as the general scan asks them.
+            if let home = inputs.home {
+                let relative = String(ProjectDiscovery.key(folder).dropFirst(ProjectDiscovery.key(home).count + 1))
+                let listing = CacheRules.listing(home: home, relative: relative)
+                let rules = CacheRules.tier(path: relative, inside: listing.inside, beside: listing.beside, home: home)
+                if rules.tier == .keep { return (CacheRules.protectedReason(rules), facts) }
+            }
+            if let alarm = facts.alarm { return (CacheRules.alarmReason(alarm), facts) }
+            guard let idle = facts.idle(at: inputs.now) else { return ("다 훑지 못해 마지막 사용 시각을 모릅니다", facts) }
+            if idle < inputs.ages.seconds(.general) { return ("최근에 썼습니다.", facts) }
+            guard let open = inputs.open else { return ("열린 파일을 확인하지 못했습니다", facts) }
+            if open.anyOpen(under: folder.path(percentEncoded: false)) { return ("지금 쓰는 파일이 있습니다", facts) }
+            return (nil, facts)
+        case .nodeModules:
+            return NodeModules.refusal(grant.path, inputs)
+        case .jobScratch:
+            return JobScratch.refusal(grant.path, inputs)
+        }
     }
 }
