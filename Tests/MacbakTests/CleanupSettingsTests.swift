@@ -23,7 +23,7 @@ import Testing
         let ages = CleanupSettings(defaults: defaults()).ages
         #expect(ages.buildCache == 1 && ages.appCache == 3 && ages.general == 3 && ages.logs == 30)
         #expect(ages.deviceSupportProtect == 3 && ages.deviceSupportShallow == 14 && ages.simulatorQuiet == 5)
-        #expect(ages.aiChatLogs == 90 && ages.aiJobScratch == 7 && ages.nodeModules == 60)
+        #expect(ages.aiChatLogs == 90 && ages.aiJobScratch == 7 && ages.nodeModules == 60 && ages.aiSessionIdle == 24)
         #expect(ages == CleanupAges())
     }
 
@@ -31,9 +31,9 @@ import Testing
         let store = defaults()
         let settings = CleanupSettings(defaults: store)
         settings.set(.buildCache, 3)
-        settings.set(.logs, 60)
+        settings.set(.aiSessionIdle, 6)
         let again = CleanupSettings(defaults: store).ages
-        #expect(again.buildCache == 3 && again.logs == 60)
+        #expect(again.buildCache == 3 && again.aiSessionIdle == 6)
         settings.resetToDefaults()
         #expect(CleanupSettings(defaults: store).ages == CleanupAges())
     }
@@ -48,9 +48,9 @@ import Testing
 
         let settings = CleanupSettings(defaults: store)
         settings.set(.appCache, 0)
-        settings.set(.logs, 1)
-        #expect(settings.ages.appCache == 3 && settings.ages.logs == 30)
-        #expect(CleanupAges.Item.allCases.allSatisfy { item in item.choices.allSatisfy { $0 >= 1 } })
+        settings.set(.aiSessionIdle, 1)
+        #expect(settings.ages.appCache == 3 && settings.ages.aiSessionIdle == 24)
+        #expect(CleanupAges.Item.allCases.allSatisfy { item in item.choices.allSatisfy { $0 >= (item.inHours ? 6 : 1) } })
     }
 
     @Test func automaticDeviceSupportCleanUpNeverComesBeforeItsProtectionEnds() {

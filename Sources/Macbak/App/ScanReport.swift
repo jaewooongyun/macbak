@@ -43,10 +43,13 @@ enum ScanReport {
         let untrusted = rows.filter { $0.isPreselected && !$0.trusted }
         print("ticked in the dashboard only: \(untrusted.count) · \(untrusted.reduce(0) { $0 + $1.bytes }.diskText)")
 
+        // The memory screen's reading, twice, ten seconds apart as the screen refreshes; counts only.
+        let processes = processes(SystemMonitor.ProcessSources(), apps: OrphanProcesses.runningApps(),
+                                  idleAge: settings.ages.seconds(.aiSessionIdle)) { RunLoop.main.run(until: .now.addingTimeInterval(10)) }
         print("")
         for line in lines(Summary(runtimes: coordinator.rows(in: .runtimes), projects: coordinator.rows(in: .projects), jobs: coordinator.rows(in: .jobs),
                                   discovery: coordinator.discovery, standardCaches: XcodeCacheScanner.standardCaches(FileManager.default.homeDirectoryForCurrentUser).count,
-                                  memory: BorrowerMemory.live().load(), lifts: coordinator.lifts.count)) {
+                                  memory: BorrowerMemory.live().load(), lifts: coordinator.lifts.count, processes: processes)) {
             print(line)
         }
         for area in CleanupCoordinator.Area.allCases {
@@ -107,8 +110,15 @@ enum ScanReport {
         exit(0)
     }
 
-    /// What the expanded scan found, for the report's summary.
+    /// What the expanded scan and the memory side found, for the report's summary.
     struct Summary {
+        struct Processes: Equatable {
+            var helpersSummed: Bool
+            var orphans: Int
+            /// nil when the sessions folder could not be read.
+            var idleSessions: Int?
+        }
+
         var runtimes: [CleanupCandidate]
         var projects: [CleanupCandidate]
         var jobs: [CleanupCandidate]
@@ -117,6 +127,8 @@ enum ScanReport {
         var standardCaches: Int
         var memory: BorrowerMemory.State
         var lifts: Int
+        /// nil when the process list could not be read.
+        var processes: Processes?
     }
 
     /// One line per area and state: counts only, never a row's name or path.
@@ -145,6 +157,22 @@ enum ScanReport {
         case .edges(let edges): lines.append("차용 기억: 정상 · 연결 \(edges.count)개")
         }
         lines.append("다시 증명한 보통 줄: \(summary.lifts)개")
+        if let side = summary.processes {
+            lines.append("메모리 쪽: 보조 프로세스 합산 " + (side.helpersSummed ? "가능" : "불가") + " · 주인 없는 개발 도구 \(side.orphans)개 · 오래 쉬는 AI 세션 "
+                         + (side.idleSessions.map { "\($0)개" } ?? "읽지 못함"))
+        } else {
+            lines.append("메모리 쪽: 프로세스 목록을 읽지 못함")
+        }
         return lines
+    }
+
+    /// The memory screen's reading taken twice with `between` in the middle, since idle sessions need two; reads only.
+    nonisolated static func processes(_ sources: SystemMonitor.ProcessSources, apps: [pid_t: String?], idleAge: TimeInterval, between: () -> Void) -> Summary.Processes? {
+        let first = sources.read(previous: nil, apps: apps, idleAge: idleAge)
+        guard first.snapshot != nil else { return nil }
+        between()
+        let second = sources.read(previous: first.snapshot, apps: apps, idleAge: idleAge)
+        guard second.snapshot != nil else { return nil }
+        return Summary.Processes(helpersSummed: second.owners != nil, orphans: second.orphans.count, idleSessions: second.sessions?.count)
     }
 }

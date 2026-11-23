@@ -51,7 +51,19 @@ struct RunWording {
 }
 
 extension AppMemory {
-    var runStep: RunStep { RunStep(id: "\(id)", name: name, icon: .app(icon), amount: Double(footprint), amountText: footprintText) }
+    var runStep: RunStep { RunStep(id: "\(id)", name: name, icon: .app(icon), amount: Double(total), amountText: totalText) }
+}
+
+extension IdleSession {
+    var runStep: RunStep {
+        RunStep(id: "session.\(id)", name: record.name, icon: .symbol("sparkles"), amount: Double(footprint), amountText: footprint.memoryText)
+    }
+}
+
+extension OrphanProcess {
+    var runStep: RunStep {
+        RunStep(id: "orphan.\(pid)", name: name, icon: .symbol("terminal"), amount: Double(footprint ?? 0), amountText: footprint?.memoryText ?? "–")
+    }
 }
 
 extension CleanupCandidate {

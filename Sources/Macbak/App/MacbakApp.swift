@@ -76,9 +76,10 @@ struct MacbakApp: App {
     init() {
         // Started here, not in a view, so monitoring and the loop keep running with the window closed.
         // The menu bar panel shows the app list and AI use too, so it counts as a window here.
-        // One set of clean-up ages for every scan, the executor (through the saved values) and the scheduled loop.
+        // One set of clean-up ages for every scan, the executor (through the saved values), the scheduled loop and the
+        // memory screen's idle sessions.
         let cleanupSettings = CleanupSettings()
-        let system = SystemMonitor(isWindowShown: { MainWindow.isOnScreen || MenuBarPanel.isOpen })
+        let system = SystemMonitor(isWindowShown: { MainWindow.isOnScreen || MenuBarPanel.isOpen }, ages: { cleanupSettings.ages })
         let ai = AIMonitor(isWindowShown: { MainWindow.isOnScreen || MenuBarPanel.isOpen })
         let cleanup = CleanupCoordinator(settings: cleanupSettings)
         let storage = AIStorage(settings: cleanupSettings)

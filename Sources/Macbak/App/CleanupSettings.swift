@@ -2,13 +2,13 @@ import Foundation
 import Observation
 
 /// How long each kind of item must sit untouched before a clean-up may take it. The defaults are the rules' standing
-/// values; every choice is at least a day, since a shorter wait would offer things still in use.
+/// values; every choice is at least a day (an AI session six hours), since a shorter wait would offer things still in use.
 /// - Important: The scheduled loop and the menu bar's immediate clean-up read the same values, so a shorter choice widens
 ///   what goes without anyone picking it. Open files and running apps protect an item whatever the age.
 struct CleanupAges: Equatable, Sendable {
     enum Item: String, CaseIterable, Sendable {
         case buildCache, appCache, general, logs, deviceSupportProtect, deviceSupportShallow, simulatorQuiet
-        case aiChatLogs, aiJobScratch, nodeModules
+        case aiChatLogs, aiJobScratch, nodeModules, aiSessionIdle
 
         var title: String {
             switch self {
@@ -22,6 +22,7 @@ struct CleanupAges: Equatable, Sendable {
             case .aiChatLogs: "AI 대화 기록"
             case .aiJobScratch: "끝난 AI 작업 임시 파일"
             case .nodeModules: "오래 안 쓴 프로젝트의 node_modules"
+            case .aiSessionIdle: "오래 쉬는 AI 세션"
             }
         }
 
@@ -36,11 +37,13 @@ struct CleanupAges: Equatable, Sendable {
             case .aiChatLogs: [30, 60, 90, 180, 365]
             case .aiJobScratch: [3, 7, 14, 30]
             case .nodeModules: [30, 60, 90, 180]
+            case .aiSessionIdle: [6, 12, 24, 48, 72]
             }
         }
 
-        /// Days, for every item.
-        var unit: String { "일" }
+        /// Hours for an AI session, days for everything else.
+        var inHours: Bool { self == .aiSessionIdle }
+        var unit: String { inHours ? "시간" : "일" }
         var key: String { "cleanup.age." + rawValue }
     }
 
@@ -54,6 +57,7 @@ struct CleanupAges: Equatable, Sendable {
     var aiChatLogs = 90
     var aiJobScratch = 7
     var nodeModules = 60
+    var aiSessionIdle = 24
 
     subscript(item: Item) -> Int {
         get {
@@ -68,6 +72,7 @@ struct CleanupAges: Equatable, Sendable {
             case .aiChatLogs: aiChatLogs
             case .aiJobScratch: aiJobScratch
             case .nodeModules: nodeModules
+            case .aiSessionIdle: aiSessionIdle
             }
         }
         set {
@@ -82,12 +87,13 @@ struct CleanupAges: Equatable, Sendable {
             case .aiChatLogs: aiChatLogs = newValue
             case .aiJobScratch: aiJobScratch = newValue
             case .nodeModules: nodeModules = newValue
+            case .aiSessionIdle: aiSessionIdle = newValue
             }
         }
     }
 
     /// The item's wait in seconds.
-    func seconds(_ item: Item) -> TimeInterval { TimeInterval(self[item]) * 86_400 }
+    func seconds(_ item: Item) -> TimeInterval { TimeInterval(self[item]) * (item.inHours ? 3_600 : 86_400) }
 
     /// Saved values, each taken only if it is one of its item's choices; anything else, or nothing saved, is the default.
     /// Automatic clean-up of device support never comes before its protection ends.

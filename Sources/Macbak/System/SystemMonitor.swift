@@ -112,7 +112,8 @@ struct CPUTicks: Equatable {
 
 extension AppMemory {
     /// "1.2 GB", or "–" when the memory could not be read.
-    var footprintText: String { footprint > 0 ? footprint.memoryText : "–" }
+    /// With its helpers; "–" when its own memory could not be read, since the helpers alone would understate it.
+    var totalText: String { footprint > 0 ? total.memoryText : "–" }
 }
 
 struct AppMemory: Identifiable {
@@ -128,6 +129,13 @@ struct AppMemory: Identifiable {
     var isActive = false
     /// Normal windows, minimized and on other Spaces included; nil when the window list could not be read.
     var windows: Int?
+    /// The processes it is responsible for besides its own, and their memory; empty and 0 until the memory screen measures.
+    var helperPIDs: Set<pid_t> = []
+    var helpers: UInt64 = 0
+    /// Its own pid and its helpers'.
+    var members: Set<pid_t> { helperPIDs.union([id]) }
+
+    var total: UInt64 { footprint + helpers }
 }
 
 /// Read-only system queries. Nothing here writes, deletes, or needs extra permission.
@@ -262,6 +270,19 @@ final class SystemMonitor {
     private(set) var apps: [AppMemory] = []
     /// Every regular app, for finding the ones not in use.
     private(set) var running: [AppMemory] = []
+    /// Set by the memory screen while it is shown; only then is every process read (helpers, orphans, idle sessions).
+    @ObservationIgnored var memoryScreenShown = false
+    private(set) var ownership: ProcessOwnership.State = .off
+    /// The latest full process read, while the memory screen is shown.
+    private(set) var processes: ProcessSnapshot?
+    /// Developer tools left running with no owner, while the memory screen is shown.
+    private(set) var orphans: [OrphanProcess] = []
+    /// Claude sessions idle past the Settings age, while the memory screen is shown.
+    private(set) var idleSessions: [IdleSession] = []
+    /// The Settings age past which an idle AI session is offered.
+    var sessionIdleAge: TimeInterval { ages().seconds(.aiSessionIdle) }
+    @ObservationIgnored private let ages: @MainActor () -> CleanupAges
+    @ObservationIgnored private let processSources: ProcessSources
     /// CPU, GPU and memory per sample, oldest first; empty until two CPU readings exist.
     private(set) var vitals: [VitalSample] = []
     let cores = ProcessInfo.processInfo.activeProcessorCount
@@ -276,10 +297,49 @@ final class SystemMonitor {
     let trackingSince = Date.now
     @ObservationIgnored private var activationObserver: NSObjectProtocol?
 
+    /// What the memory screen reads about every process; tests replace it to count reads or feed a table.
+    struct ProcessSources: Sendable {
+        var snapshot: @Sendable () -> ProcessSnapshot? = { ProcessSnapshot.capture() }
+        var responsible: ProcessOwnership.Responsible? = ProcessOwnership.live
+        var services: @Sendable () -> Set<pid_t>? = { OrphanProcesses.servicePIDs() }
+        var sessions: @Sendable () -> [AISessions.Record]? = { AISessions.readLive() }
+        var jobStates: @Sendable ([String]) -> [String: String] = { AISessions.jobStatesLive($0) }
+
+        /// One full read the way the memory screen reads it: helpers' owners, orphaned tools and idle sessions.
+        struct Reading: Sendable {
+            var snapshot: ProcessSnapshot?
+            var owners: ProcessOwnership.Owners?
+            var orphans: [OrphanProcess] = []
+            /// nil when the sessions folder could not be read.
+            var sessions: [IdleSession]?
+        }
+
+        /// - Parameters:
+        ///   - previous: the reading before, for helpers' activity; idle sessions need one five seconds or more earlier.
+        ///   - apps: every running application's pid and bundle folder, read on the main actor.
+        func read(previous: ProcessSnapshot?, apps: [pid_t: String?], idleAge: TimeInterval) -> Reading {
+            guard let snapshot = snapshot() else { return Reading() }
+            let records = sessions()
+            let sessions = records.flatMap { records in
+                AISessions.store.map { store in
+                    AISessions.candidates(.init(records: records, snapshot: snapshot, previous: previous, jobStates: jobStates(records.compactMap(\.jobId)),
+                                                store: store, idleAge: idleAge, now: .now, names: AISessions.names))
+                }
+            }
+            return Reading(snapshot: snapshot, owners: responsible.map { ProcessOwnership.owners(snapshot, responsible: $0) },
+                           orphans: OrphanProcesses.candidates(.init(snapshot: snapshot, services: services(), apps: apps, home: NSHomeDirectory(), now: .now)),
+                           sessions: sessions)
+        }
+    }
+
     /// - Parameter isWindowShown: the app list feeds only the window, so it is not read while the window is off screen.
-    init(interval: Duration = .seconds(2), isWindowShown: @escaping @MainActor () -> Bool = { true }) {
+    /// - Parameter ages: the Settings ages, read on each refresh.
+    init(interval: Duration = .seconds(2), isWindowShown: @escaping @MainActor () -> Bool = { true }, processes: ProcessSources = ProcessSources(),
+         ages: @escaping @MainActor () -> CleanupAges = { CleanupAges() }) {
         self.interval = interval
         self.isWindowShown = isWindowShown
+        processSources = processes
+        self.ages = ages
         if let front = NSWorkspace.shared.frontmostApplication { lastActive[front.processIdentifier] = .now }
         activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
@@ -319,10 +379,42 @@ final class SystemMonitor {
     }
 
     private func refreshApps() {
-        running = SystemReader.runningApps()
-        apps = Array(running.prefix(6))
+        let fresh = SystemReader.runningApps()
         // Only processes that are gone lose their record; a reused pid is told apart by launch date in `IdleApps`.
         lastActive = lastActive.filter { NSRunningApplication(processIdentifier: $0.key) != nil }
+        // While the memory screen is shown the list waits for the helpers, so rows do not jump from own to total memory.
+        if memoryScreenShown { Task { await refreshProcesses(fresh) } } else { show(fresh) }
+    }
+
+    /// Reads every process off the main actor and adds each app's helpers; reads nothing while the memory screen is not shown.
+    /// - Parameter fresh: the apps just read; nil reads them again.
+    func refreshProcesses(_ fresh: [AppMemory]? = nil) async {
+        guard memoryScreenShown else { return }
+        let sources = processSources
+        let running = OrphanProcesses.runningApps()
+        // Helpers' activity is measured against the reading before, ten seconds earlier.
+        let previous = processes
+        let idleAge = sessionIdleAge
+        let reading = await Task.detached(priority: .utility) { sources.read(previous: previous, apps: running, idleAge: idleAge) }.value
+        let fresh = fresh ?? SystemReader.runningApps()
+        guard memoryScreenShown else { return show(fresh) }
+        let (summed, state) = ProcessOwnership.apply(fresh, snapshot: reading.snapshot, owners: reading.owners)
+        show(summed)
+        ownership = state
+        processes = reading.snapshot
+        orphans = reading.orphans
+        idleSessions = reading.sessions ?? []
+    }
+
+    private func show(_ fresh: [AppMemory]) {
+        running = fresh
+        apps = Array(fresh.prefix(6))
+        if !memoryScreenShown {
+            ownership = .off
+            processes = nil
+            orphans = []
+            idleSessions = []
+        }
     }
 
     var historySpanText: String {
