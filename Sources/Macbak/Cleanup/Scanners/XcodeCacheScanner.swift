@@ -19,7 +19,25 @@ enum XcodeCacheScanner {
         let label: String
     }
 
-    static func scan(_ context: ScanContext) -> [CleanupCandidate] {
+    static func scan(_ context: ScanContext) -> [CleanupCandidate] { scan(context, reproving: nil, reprove: false) }
+
+    /// The rows of every workspace group holding one of `caches`, rebuilt whole (each member, its targets and guards).
+    /// With `reprove`, the package proof may borrow objects from inside each cache, and each row is a choice only:
+    /// `manualOnly`, `reproved`.
+    /// - Important: Expanded scan only. It costs git calls per package file the usual scan must not add.
+    static func scan(_ context: ScanContext, only caches: Set<String>, reprove: Bool) -> [CleanupCandidate] {
+        let keys = Set(caches.map { PathKey.fold(PathGuard.realPath(URL(fileURLWithPath: $0)) ?? $0) })
+        return scan(context, reproving: keys, reprove: reprove).map { row in
+            guard reprove else { return row }
+            var row = row
+            row.manualOnly = true
+            row.reproved = true
+            row.trusted = false
+            return row
+        }
+    }
+
+    private static func scan(_ context: ScanContext, reproving: Set<String>?, reprove: Bool) -> [CleanupCandidate] {
         // First list what to look at (cheap), then walk it all at once (the slow part).
         var found: [(item: URL, root: URL, label: String, workspace: String?)] = []
         if let root = ScanSupport.resolved(context.home, "Library/Developer/Xcode/DerivedData") {
@@ -47,8 +65,25 @@ enum XcodeCacheScanner {
             }
         }
 
+        // Who borrows package objects from whom, from every build cache listed here and the remembered borrowers.
+        let caches = found.filter { ($0.label == "Xcode" || $0.label == "MCP") && !sharedNames.contains($0.item.lastPathComponent) }.map(\.item)
+        let lending = lendingMap(caches: caches, memory: context.borrowerMemory)
+
+        if let reproving {
+            // Whole groups: a member that holds a broken checkout brings every other member of its workspace, so their
+            // own protection (recent use, open files) and targets stay with the row.
+            func key(_ url: URL) -> String { PathKey.fold(PathGuard.realPath(url) ?? url.path(percentEncoded: false)) }
+            let hit = found.filter { reproving.contains(key($0.item)) }
+            let workspaces = Set(hit.compactMap { $0.workspace.map(PathKey.fold) })
+            found = found.filter { entry in
+                !sharedNames.contains(entry.item.lastPathComponent)
+                    && (reproving.contains(key(entry.item)) || entry.workspace.map { workspaces.contains(PathKey.fold($0)) } ?? false)
+            }
+        }
         // The same deep checks a run nobody chose makes before deleting, so a row shown as shallow is not refused then.
-        let facts = TreeWalk.inspectAll(found.map(\.item), budget: .seconds(120), alarm: CacheRules.isAlarmName, notice: CacheRules.blocksShallow)
+        let facts = TreeWalk.inspectAll(found.map(\.item), budget: .seconds(120),
+                                        alarm: { CacheRules.isAlarmName($0, isFolder: $1, reprove: reprove) },
+                                        notice: { CacheRules.blocksShallow($0, reprove: reprove) })
         var members: [Member] = []
         var shared: [Member] = []
         for (entry, facts) in zip(found, facts) {
@@ -60,13 +95,51 @@ enum XcodeCacheScanner {
 
         var candidates: [CleanupCandidate] = []
         let grouped = Dictionary(grouping: members.filter { $0.workspace != nil }) { PathKey.fold($0.workspace!) }
-        for group in grouped.values { candidates.append(candidate(group, workspace: group[0].workspace, context: context)) }
-        for member in members where member.workspace == nil { candidates.append(candidate([member], workspace: nil, context: context)) }
+        for group in grouped.values { candidates.append(candidate(group, workspace: group[0].workspace, context: context, lending: lending)) }
+        for member in members where member.workspace == nil {
+            candidates.append(candidate([member], workspace: nil, context: context, lending: lending))
+        }
         if !shared.isEmpty { candidates.append(sharedCandidate(shared, context: context)) }
+        // A memory that does not read: a lender's borrower may be somewhere this scan did not look, so nothing here goes
+        // without a person picking it. The next scan writes the memory again.
+        if lending.memoryCorrupt { for index in candidates.indices { candidates[index].manualOnly = true } }
         return candidates.filter { $0.bytes >= ScanSupport.minimumBytes }
     }
 
-    private static func candidate(_ group: [Member], workspace: String?, context: ScanContext) -> CleanupCandidate {
+    /// Lenders and their live borrowers, and the caches holding a fully broken checkout.
+    struct Lending: Sendable {
+        var borrowers: [String: Set<String>] = [:]
+        var broken: Set<String> = []
+        var memoryCorrupt = false
+
+        /// Borrowers of `cache` outside `row`'s own targets.
+        func outside(_ cache: URL, row: [URL]) -> Set<String> {
+            let key = PathGuard.realPath(cache) ?? cache.path(percentEncoded: false)
+            let inside = row.map { PathKey.fold((PathGuard.realPath($0) ?? $0.path(percentEncoded: false)) + "/") }
+            return borrowers.filter { CheckoutAlternates.same($0.key, key) }.values.reduce(into: Set<String>()) { $0.formUnion($1) }
+                .filter { file in !inside.contains { PathKey.fold(file).hasPrefix($0) } }
+        }
+    }
+
+    /// Reads the caches' alternates, rechecks and merges the remembered borrowers, and writes the memory back.
+    static func lendingMap(caches: [URL], memory: BorrowerMemory?) -> Lending {
+        let map = CheckoutAlternates.read(caches: caches)
+        var lending = Lending(borrowers: map.borrowers, broken: map.broken)
+        guard let memory else { return lending }
+        let state = memory.load()
+        lending.memoryCorrupt = state == .corrupt
+        let (live, gone) = BorrowerMemory.recheck(state.known)
+        for edge in live { lending.borrowers[edge.lender, default: []].insert(edge.borrower) }
+        let seen = Set(map.borrowers.flatMap { lender, files in files.map { BorrowerMemory.Edge(lender: lender, borrower: $0) } })
+        memory.commit(seen: seen, gone: gone)
+        return lending
+    }
+
+    private static func candidate(_ unordered: [Member], workspace: String?, context: ScanContext, lending: Lending) -> CleanupCandidate {
+        // A member that lends to another member goes last, so the borrower is gone before its lender is.
+        let paths = unordered.map(\.target.path)
+        let lends = { (member: Member) in !lending.outside(member.target.path, row: []).subtracting(lending.outside(member.target.path, row: paths)).isEmpty }
+        let group = unordered.filter { !lends($0) } + unordered.filter(lends)
         let complete = group.allSatisfy(\.facts.isComplete)
         let newest = group.compactMap(\.facts.newest).max()
         let idle = newest.map { context.now.timeIntervalSince($0) }
@@ -81,6 +154,9 @@ enum XcodeCacheScanner {
         // Test results and their attachments: a rebuild does not bring the same run back, so a person chooses.
         if group.contains(where: { $0.label == "MCP result-bundles" }) { evidence.userData = true }
         if let alarm = group.lazy.compactMap(\.facts.alarm).first { evidence.protectedReason = CacheRules.alarmReason(alarm) }
+        // Another cache reads package objects from one of these: deleting it would break that cache's checkouts.
+        let borrowers = Set(group.flatMap { lending.outside($0.target.path, row: paths) }.map { PathKey.fold(CheckoutAlternates.cache(ofBorrower: $0)) })
+        if !borrowers.isEmpty { evidence.protectedReason = "다른 캐시 \(borrowers.count)개가 이 캐시의 패키지 기록을 빌려 씁니다." }
 
         let bytes = group.reduce(Int64(0)) { $0 + $1.facts.bytes }
         let name: String

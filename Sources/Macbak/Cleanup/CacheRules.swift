@@ -222,14 +222,17 @@ enum CacheRules {
     ///   in the build caches of apps that use it, hold `credentials` folders of C++ code. Such a folder is judged by what
     ///   it holds: anything but source code in it alarms, unless git shows it is a package's own unchanged file
     ///   (a checked-out `CMakeLists.txt`). Extensions match folders too: keychains, disk images and VMs are often bundles.
-    @Sendable static func isAlarmName(_ url: URL, isFolder: Bool) -> Bool {
+    @Sendable static func isAlarmName(_ url: URL, isFolder: Bool) -> Bool { isAlarmName(url, isFolder: isFolder, reprove: false) }
+
+    /// The same, with `reprove` handed to the package proof (the expanded scan only).
+    @Sendable static func isAlarmName(_ url: URL, isFolder: Bool, reprove: Bool) -> Bool {
         let low = url.lastPathComponent.lowercased()
         if alarmExtensions.contains(where: low.hasSuffix) { return true }
         if isFolder { return alarmFolderNames.contains(low) }
         if alarmNames.contains(low) { return true }
         let folder = url.deletingLastPathComponent().path(percentEncoded: false) + "/"
         guard folder.range(of: "/credentials/", options: .caseInsensitive) != nil else { return false }
-        return !sourceExtensions.contains(where: low.hasSuffix) && !PackageCheckout.isPristine(url)
+        return !sourceExtensions.contains(where: low.hasSuffix) && !PackageCheckout.isPristine(url, reprove: reprove)
     }
 
     /// Names that, anywhere inside, keep a row out of the shallow clean-up (which runs without a click), though the
@@ -240,8 +243,11 @@ enum CacheRules {
 
     /// - Note: A document SwiftPM checked out with a package (a package's icons, test files or design
     ///   notes) does not hold a row back when git shows it is tracked and unchanged; one changed or added there does.
-    @Sendable static func blocksShallow(_ url: URL) -> Bool {
-        shallowBlockerExtensions.contains(where: url.lastPathComponent.lowercased().hasSuffix) && !PackageCheckout.isPristine(url)
+    @Sendable static func blocksShallow(_ url: URL) -> Bool { blocksShallow(url, reprove: false) }
+
+    /// The same, with `reprove` handed to the package proof (the expanded scan only).
+    @Sendable static func blocksShallow(_ url: URL, reprove: Bool) -> Bool {
+        shallowBlockerExtensions.contains(where: url.lastPathComponent.lowercased().hasSuffix) && !PackageCheckout.isPristine(url, reprove: reprove)
     }
 
     /// The reason shown on a row kept for a deep alarm name.

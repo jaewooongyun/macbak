@@ -82,6 +82,12 @@ struct CleanupCandidate: Identifiable, Sendable {
     /// 3-day rule). Ready rows with it make the shallow clean-up: the menu bar's button and the scheduled loop.
     /// - Important: Set by the scanner that makes the row, never by the on-device model.
     var trusted = false
+    /// Deleted only when a person ticks it in the dashboard: never ticked to begin with, never in the shallow clean-up,
+    /// whatever its verdict. Rows found outside the usual places, or proven by a method the usual scan does not use, carry it.
+    var manualOnly = false
+    /// Proven only by borrowing package objects from inside its own build cache (the expanded scan); the usual scan
+    /// keeps such a row for the alarm it cannot clear.
+    var reproved = false
     /// The clean-up ages the scan judged it by. The executor refuses it once Settings hold other ages.
     var ages = CleanupAges()
 
@@ -95,6 +101,8 @@ struct CleanupCandidate: Identifiable, Sendable {
         row.toolCommand = toolCommand
         row.exploreInput = exploreInput
         row.trusted = trusted
+        row.manualOnly = manualOnly
+        row.reproved = reproved
         row.ages = ages
         return row
     }

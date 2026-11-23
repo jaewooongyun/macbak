@@ -26,10 +26,15 @@ enum Command {
     ///   the caller for good when a process ignored SIGTERM, was stuck in the kernel (`lsof` on a dead network volume), or
     ///   left a child holding the output pipe; a run waiting on `lsof` then stayed "정리하는 중" forever. After the deadline
     ///   the process gets SIGTERM, then SIGKILL two seconds later, and the reading thread is abandoned if still blocked.
-    static func run(_ executable: String, _ arguments: [String], timeout: Duration) -> Output? {
+    /// - Parameters:
+    ///   - environment: added to the inherited environment; nil runs with it unchanged.
+    ///   - maxBytes: output past this ends the process and answers nil, so a huge listing cannot fill memory.
+    static func run(_ executable: String, _ arguments: [String], timeout: Duration, environment: [String: String]? = nil,
+                    maxBytes: Int? = nil) -> Output? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
+        if let environment { process.environment = ProcessInfo.processInfo.environment.merging(environment) { $1 } }
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice
@@ -39,13 +44,34 @@ enum Command {
         do { try process.run() } catch { return nil }
 
         // Read on another thread, all the way to the end so a large output never fills the pipe and stalls the process.
+        // A thread of its own, not a GCD worker: callers block a pool thread each while they wait here, and once they
+        // fill the pool no worker comes to read, so every call waits out its timeout (2026-11-23: 14 of 14 pool
+        // threads waiting on `read`, no reader running).
         let output = OSAllocatedUnfairLock<Data?>(initialState: nil)
         let read = DispatchSemaphore(value: 0)
-        DispatchQueue.global(qos: .utility).async {
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            output.withLock { $0 = data }
+        Thread {
+            let handle = pipe.fileHandleForReading
+            var data = Data()
+            if let maxBytes {
+                while true {
+                    let chunk = handle.availableData
+                    if chunk.isEmpty { break }
+                    data.append(chunk)
+                    // Too much: stop the command; nil below, whatever it printed.
+                    if data.count > maxBytes {
+                        process.terminate()
+                        output.withLock { $0 = nil }
+                        read.signal()
+                        return
+                    }
+                }
+            } else {
+                data = handle.readDataToEndOfFile()
+            }
+            let whole = data
+            output.withLock { $0 = whole }
             read.signal()
-        }
+        }.start()
         let deadline = DispatchTime.now() + timeout.seconds
         guard exited.wait(timeout: deadline) == .success else {
             process.terminate()
@@ -133,16 +159,63 @@ struct OpenFiles: Sendable {
 /// - Note: Nothing is written and the index is never read, so git does not refresh it (a write that would make the cache
 ///   look used); `--no-filters` runs no `.gitattributes` filter program.
 enum PackageCheckout {
-    static func isPristine(_ url: URL) -> Bool {
+    /// - Parameter reprove: when the proof fails because every object folder the checkout borrows through
+    ///   `.git/objects/info/alternates` is gone (the build cache that lent them was deleted), prove it again against the
+    ///   same packages' object folders inside this checkout's own build cache. Only the expanded scan asks for it; it
+    ///   costs git calls the periodic scan must not add.
+    static func isPristine(_ url: URL, reprove: Bool = false) -> Bool {
         let path = url.path(percentEncoded: false)
         let parts = path.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
         // Without developer tools (Xcode removed, its build caches left behind) git would open an install dialog.
         guard let at = parts.indices.dropFirst().first(where: { parts[$0].lowercased() == "checkouts" && parts[$0 - 1].lowercased() == "sourcepackages" }),
               at + 2 < parts.count, DeveloperTools.available else { return false }
         let root = parts[...(at + 1)].joined(separator: "/")
+        let inside = parts[(at + 2)...].joined(separator: "/")
+        if proves(url, root: root, inside: inside, environment: nil) { return true }
+        guard reprove, let objects = sameCacheObjects(checkout: root, cache: parts[..<(at - 1)].joined(separator: "/")) else { return false }
+        // No locks, no lazy fetch: the proof only reads.
+        return proves(url, root: root, inside: inside, environment: ["GIT_ALTERNATE_OBJECT_DIRECTORIES": objects.joined(separator: ":"),
+                                                                     "GIT_OPTIONAL_LOCKS": "0", "GIT_NO_LAZY_FETCH": "1"])
+    }
+
+    /// The object folders to borrow instead, or nil unless all hold: every folder the checkout's alternates name is gone
+    /// (one still there means the failure is something else, and nothing outside is followed); each named a package's
+    /// `SourcePackages/repositories/<name>/objects`; the same path exists in `cache`, is no link, and borrows from nowhere
+    /// itself (its own non-empty alternates could lead out of the cache).
+    static func sameCacheObjects(checkout: String, cache: String) -> [String]? {
+        let objects = checkout + "/.git/objects"
+        guard let text = try? String(contentsOfFile: objects + "/info/alternates", encoding: .utf8) else { return nil }
+        let lines = text.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && !$0.hasPrefix("#") }
+        guard !lines.isEmpty else { return nil }
+        let marker = "/SourcePackages/repositories/"
+        var found: [String] = []
+        for line in lines {
+            let named = line.hasPrefix("/") ? line : objects + "/" + line
+            var isFolder: ObjCBool = false
+            if FileManager.default.fileExists(atPath: named, isDirectory: &isFolder) { return nil }
+            guard let range = named.range(of: marker, options: [.caseInsensitive, .backwards]) else { return nil }
+            let tail = String(named[range.upperBound...])
+            guard !tail.isEmpty, !tail.split(separator: "/").contains(where: { $0 == "." || $0 == ".." }) else { return nil }
+            let replacement = cache + "/SourcePackages/repositories/" + tail
+            // No link anywhere below the cache: the folder resolves to the cache's own resolved path plus the same tail.
+            guard let realCache = PathGuard.realPath(URL(fileURLWithPath: cache)),
+                  PathGuard.realPath(URL(fileURLWithPath: replacement)) == realCache + "/SourcePackages/repositories/" + tail,
+                  FileManager.default.fileExists(atPath: replacement, isDirectory: &isFolder), isFolder.boolValue else { return nil }
+            let own = (try? String(contentsOfFile: replacement + "/info/alternates", encoding: .utf8)) ?? ""
+            guard own.split(whereSeparator: \.isNewline).allSatisfy({ $0.trimmingCharacters(in: .whitespaces).isEmpty || $0.hasPrefix("#") })
+            else { return nil }
+            found.append(replacement)
+        }
+        return found
+    }
+
+    /// The proof itself, as described on the type.
+    private static func proves(_ url: URL, root: String, inside: String, environment: [String: String]?) -> Bool {
         /// The output of a command that succeeded, empty or not; nil when it failed.
         func run(_ arguments: [String]) -> Data? {
-            guard let output = Command.run("/usr/bin/git", ["-C", root, "--literal-pathspecs"] + arguments, timeout: .seconds(10)),
+            guard let output = Command.run("/usr/bin/git", ["-C", root, "--literal-pathspecs"] + arguments, timeout: .seconds(10),
+                                           environment: environment),
                   output.status == 0 else { return nil }
             return output.stdout
         }
@@ -150,7 +223,7 @@ enum PackageCheckout {
         guard git(["for-each-ref", "--contains", "HEAD", "--count=1", "--format=%(refname)", "refs/remotes"]) != nil,
               // The whole checkout goes with the cache, so no branch or stash may hold a commit the remote does not have.
               run(["rev-list", "-n", "1", "--branches", "--glob=refs/stash", "--not", "--remotes"])?.isEmpty == true,
-              let tree = git(["ls-tree", "-r", "-z", "HEAD", "--", parts[(at + 2)...].joined(separator: "/")]) else { return false }
+              let tree = git(["ls-tree", "-r", "-z", "HEAD", "--", inside]) else { return false }
         // "<mode> blob <hash>\t<path>", one per regular file HEAD has at the path.
         var committed: [String: String] = [:]
         for entry in tree.split(separator: 0) {
@@ -332,5 +405,168 @@ enum TreeWalk {
             return
         }
         facts.listed.append(FileStamp(path: path, identity: identity, modified: modified, bytes: bytes))
+    }
+}
+
+/// Which build caches borrow package objects from which: a SwiftPM checkout's `.git/objects/info/alternates` names the
+/// object folders it reads from, often another build cache's `SourcePackages/repositories/<package>/objects`. Deleting
+/// that other cache breaks the borrower's checkout for good.
+struct CheckoutAlternates: Sendable {
+    /// Borrowers by lender: a lender cache's resolved path → the alternates files that name a folder inside it.
+    var borrowers: [String: Set<String>] = [:]
+    /// Caches holding a checkout whose every alternates line names a folder that is gone.
+    var broken: Set<String> = []
+
+    private static let marker = "/SourcePackages/repositories/"
+
+    /// Reads every checkout's alternates in `caches` (build cache folders, resolved paths).
+    static func read(caches: [URL]) -> CheckoutAlternates {
+        var map = CheckoutAlternates()
+        for cache in caches {
+            let path = cache.path(percentEncoded: false)
+            let checkouts = cache.appending(path: "SourcePackages/checkouts")
+            for checkout in ScanSupport.children(of: checkouts) ?? [] {
+                let file = checkout.appending(path: ".git/objects/info/alternates").path(percentEncoded: false)
+                guard let named = lines(file) else { continue }
+                if !named.isEmpty, named.allSatisfy({ !FileManager.default.fileExists(atPath: $0) }) { map.broken.insert(path) }
+                for target in named {
+                    guard let lender = lender(of: target), !same(lender, path) else { continue }
+                    map.borrowers[lender, default: []].insert(file)
+                }
+            }
+        }
+        return map
+    }
+
+    /// The folders an alternates file names, relative lines resolved against its `objects` folder; nil when unreadable.
+    static func lines(_ file: String) -> [String]? {
+        guard let text = try? String(contentsOfFile: file, encoding: .utf8) else { return nil }
+        let objects = ((file as NSString).deletingLastPathComponent as NSString).deletingLastPathComponent
+        return text.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && !$0.hasPrefix("#") }
+            .map { $0.hasPrefix("/") ? $0 : (objects as NSString).appendingPathComponent($0) }
+            .map { ($0 as NSString).standardizingPath }
+    }
+
+    /// The build cache a named folder sits in: everything before `/SourcePackages/repositories/`.
+    static func lender(of folder: String) -> String? {
+        folder.range(of: marker, options: [.caseInsensitive, .backwards]).map { range in
+            let cache = String(folder[..<range.lowerBound])
+            return PathGuard.realPath(URL(fileURLWithPath: cache)) ?? cache
+        }
+    }
+
+    /// The build cache an alternates file belongs to: everything before `/SourcePackages/checkouts/`.
+    static func cache(ofBorrower file: String) -> String {
+        file.range(of: "/SourcePackages/checkouts/", options: [.caseInsensitive, .backwards]).map { String(file[..<$0.lowerBound]) } ?? file
+    }
+
+    /// The same cache, whatever case or link spelled it, and with or without the trailing "/" a listed folder's URL has.
+    static func same(_ a: String, _ b: String) -> Bool { folded(a) == folded(b) }
+
+    /// Whether an alternates file lies inside `lender` itself: a checkout reading its own cache's mirror, which goes with
+    /// the cache and so never keeps it.
+    /// - Important: Case counts here, unlike in `same`: calling a borrower inside is what lets its lender go, so a
+    ///   spelling that matches only once case is folded, as a folder beside it on a case-sensitive volume, keeps it.
+    static func isInside(_ file: String, _ lender: String) -> Bool { trimmed(file).hasPrefix(trimmed(lender) + "/") }
+
+    private static func trimmed(_ path: String) -> String { path.count > 1 && path.hasSuffix("/") ? String(path.dropLast()) : path }
+    private static func folded(_ path: String) -> String { PathKey.fold(trimmed(path)) }
+
+    /// Whether the alternates file still names a folder inside `lender`. nil when the file cannot be read for another
+    /// reason than being gone: then it may still borrow.
+    static func stillBorrows(_ file: String, from lender: String) -> Bool? {
+        // Gone only when the system says so; a folder on the way that cannot be entered (no permission) says nothing.
+        var info = stat()
+        if stat(file, &info) != 0 { return errno == ENOENT || errno == ENOTDIR ? false : nil }
+        guard let named = lines(file) else { return nil }
+        return named.contains { Self.lender(of: $0).map { same($0, lender) } ?? false }
+    }
+}
+
+/// The borrowers seen so far, kept on disk so a lender stays protected after a restart, and when its borrower sits
+/// where only the expanded scan looks.
+/// - Important: Every write is read, merge, write under an exclusive lock on a separate lock file, so two scans (or the
+///   app and `--scan-report`) finishing in either order never lose a borrower the other added. A borrower is forgotten
+///   only when a scan read its alternates file again and found it gone or no longer naming the lender.
+struct BorrowerMemory: Sendable {
+    struct Edge: Codable, Hashable, Sendable {
+        /// The lender build cache's resolved path.
+        let lender: String
+        /// The borrowing checkout's alternates file.
+        let borrower: String
+    }
+
+    enum State: Equatable, Sendable {
+        /// No file yet: the first run.
+        case none
+        /// A file that does not read as this version's memory.
+        case corrupt
+        case edges(Set<Edge>)
+
+        var known: Set<Edge> { if case .edges(let edges) = self { edges } else { [] } }
+    }
+
+    private struct Stored: Codable {
+        var schemaVersion: Int
+        var edges: [Edge]
+    }
+
+    static let schemaVersion = 1
+    let url: URL
+
+    static func live() -> BorrowerMemory {
+        BorrowerMemory(url: FileManager.default.homeDirectoryForCurrentUser.appending(path: "Library/Application Support/Macbak/borrowers.json"))
+    }
+
+    func load() -> State {
+        guard FileManager.default.fileExists(atPath: url.path(percentEncoded: false)) else { return .none }
+        guard let data = try? Data(contentsOf: url), let stored = try? JSONDecoder().decode(Stored.self, from: data),
+              stored.schemaVersion == Self.schemaVersion else { return .corrupt }
+        // Older scans stored a cache's own checkout as its borrower; it goes with the cache, so it is not read, and the
+        // next commit writes the file without it.
+        return .edges(Set(stored.edges.filter { !CheckoutAlternates.isInside($0.borrower, $0.lender) }))
+    }
+
+    /// Adds `seen` and drops `gone` against what the file holds now, under the lock. Returns what it wrote, or nil when
+    /// the lock or the write failed (the file is then as before).
+    @discardableResult
+    func commit(seen: Set<Edge>, gone: Set<Edge>) -> Set<Edge>? {
+        let folder = url.deletingLastPathComponent()
+        guard (try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)) != nil else { return nil }
+        let lockPath = folder.appending(path: url.deletingPathExtension().lastPathComponent + ".lock").path(percentEncoded: false)
+        let lock = open(lockPath, O_CREAT | O_RDWR, 0o600)
+        guard lock >= 0 else { return nil }
+        defer { close(lock) }
+        guard flock(lock, LOCK_EX) == 0 else { return nil }
+        defer { flock(lock, LOCK_UN) }
+        // A borrower found gone before the lock may have been seen again since; only one still gone now is dropped.
+        let merged = load().known.union(seen).subtracting(gone.filter { CheckoutAlternates.stillBorrows($0.borrower, from: $0.lender) == false })
+        let stored = Stored(schemaVersion: Self.schemaVersion, edges: merged.sorted { ($0.lender, $0.borrower) < ($1.lender, $1.borrower) })
+        guard let data = try? JSONEncoder().encode(stored), (try? data.write(to: url, options: .atomic)) != nil else { return nil }
+        return merged
+    }
+
+    /// Alternates files that name a folder inside `lender` now: the remembered ones and those in the usual build cache
+    /// folders, each read again. One that cannot be read counts as borrowing.
+    static func liveBorrowers(of lender: String, memory: BorrowerMemory, home: URL) -> [String] {
+        var files = Set(memory.load().known.filter { CheckoutAlternates.same($0.lender, lender) }.map(\.borrower))
+        var caches: [URL] = []
+        if let root = ScanSupport.resolved(home, "Library/Developer/Xcode/DerivedData") { caches += ScanSupport.children(of: root) ?? [] }
+        if let root = ScanSupport.resolved(home, "Library/Developer/XcodeBuildMCP/workspaces") {
+            for workspace in ScanSupport.children(of: root) ?? [] { caches += ScanSupport.children(of: workspace.appending(path: "DerivedData")) ?? [] }
+        }
+        for (key, found) in CheckoutAlternates.read(caches: caches).borrowers where CheckoutAlternates.same(key, lender) { files.formUnion(found) }
+        return files.filter { CheckoutAlternates.stillBorrows($0, from: lender) != false }.sorted()
+    }
+
+    /// Reads the remembered borrowers again: those still naming their lender stay, those gone are returned to forget.
+    /// One that cannot be read stays.
+    static func recheck(_ edges: Set<Edge>) -> (live: Set<Edge>, gone: Set<Edge>) {
+        var live: Set<Edge> = [], gone: Set<Edge> = []
+        for edge in edges {
+            if CheckoutAlternates.stillBorrows(edge.borrower, from: edge.lender) == false { gone.insert(edge) } else { live.insert(edge) }
+        }
+        return (live, gone)
     }
 }

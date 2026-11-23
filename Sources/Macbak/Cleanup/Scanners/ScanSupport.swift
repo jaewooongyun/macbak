@@ -12,6 +12,8 @@ struct ScanContext: Sendable {
     let installedBundleIDs: Set<String>
     /// The ages picked in Settings when the scan started; the whole scan judges by them.
     var ages = CleanupAges()
+    /// Where borrowers between build caches are remembered; nil keeps none (tests, snapshots).
+    var borrowerMemory: BorrowerMemory?
 }
 
 enum ScanSupport {

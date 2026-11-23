@@ -228,6 +228,7 @@ final class CleanupCoordinator {
         let names = (try? FileManager.default.contentsOfDirectory(atPath: home.appending(path: "Library/Caches").path(percentEncoded: false))) ?? []
         let installed = Set(names.filter { $0.contains(".") && NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0) != nil })
         let openFiles = await Task.detached(priority: .utility) { OpenFiles.capture() }.value
-        return ScanContext(home: home, now: .now, openFiles: openFiles, runningBundleIDs: running, installedBundleIDs: installed, ages: ages)
+        return ScanContext(home: home, now: .now, openFiles: openFiles, runningBundleIDs: running, installedBundleIDs: installed, ages: ages,
+                           borrowerMemory: .live())
     }
 }

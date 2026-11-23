@@ -51,8 +51,8 @@ extension CleanupCandidate {
         !targets.isEmpty && (verdict.status == .ready || verdict.status == .review)
     }
 
-    /// Ticked to begin with: only rows that passed every check and need no choice.
-    var isPreselected: Bool { !targets.isEmpty && verdict.status == .ready }
+    /// Ticked to begin with: only rows that passed every check, need no choice, and may go without being picked.
+    var isPreselected: Bool { !manualOnly && !targets.isEmpty && verdict.status == .ready }
 
     /// In the menu bar's immediate clean-up: ticked, and vouched for by a curated source.
     var isShallow: Bool { trusted && isPreselected }

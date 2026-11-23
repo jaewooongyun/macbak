@@ -348,6 +348,19 @@ func aCancelledWaitingScanGivesUp() async {
     #expect(Command.run("/bin/echo", ["hi"], timeout: .seconds(5)).map { String(decoding: $0.stdout, as: UTF8.self) } == "hi\n")
 }
 
+/// Callers that block every thread of the pool while they wait still get their output: the reader does not need one.
+@Test func commandsThatFillThePoolStillFinish() async {
+    let started = Date.now
+    let statuses = await withTaskGroup(of: Int32?.self) { group in
+        for _ in 0..<ProcessInfo.processInfo.activeProcessorCount * 2 {
+            group.addTask { Command.run("/bin/sleep", ["0.3"], timeout: .seconds(20))?.status }
+        }
+        return await group.reduce(into: []) { $0.append($1) }
+    }
+    #expect(statuses.allSatisfy { $0 == 0 })
+    #expect(Date.now.timeIntervalSince(started) < 10)
+}
+
 /// Homebrew keeps links beside its downloads. A link among a cache folder's entries made the path guard refuse the
 /// whole row on every run; links are left out of the targets, and the executor's own checks then pass.
 @Test func aLinkAmongACachesEntriesNoLongerBlocksTheRow() async throws {

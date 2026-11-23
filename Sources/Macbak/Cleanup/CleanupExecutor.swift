@@ -67,6 +67,8 @@ actor CleanupExecutor {
         var retryDelay: Duration = .milliseconds(500)
         /// The clean-up ages Settings hold now; a row judged by other ages is refused, before every target and retry too.
         var currentAges: @Sendable () -> CleanupAges = { CleanupAges() }
+        /// Alternates files that read package objects from inside this build cache now, read again at the moment asked.
+        var liveBorrowers: @Sendable (String) -> [String] = { _ in [] }
 
         static func live() -> Dependencies {
             let home = FileManager.default.homeDirectoryForCurrentUser
@@ -88,7 +90,8 @@ actor CleanupExecutor {
                 },
                 audit: .live(),
                 // Settings write every change at once, so the saved values are the current ones.
-                currentAges: { CleanupAges(defaults: .standard) })
+                currentAges: { CleanupAges(defaults: .standard) },
+                liveBorrowers: { BorrowerMemory.liveBorrowers(of: $0, memory: .live(), home: home) })
         }
     }
 
@@ -233,6 +236,7 @@ actor CleanupExecutor {
     private func refusal(_ candidate: CleanupCandidate, current: CleanupCandidate?, shallow: Bool, overlapping: Set<String>,
                          roots: [URL], mounts: [String]?) async -> String? {
         if !candidate.isSelectable { return "정리할 수 있는 상태가 아닙니다" }
+        if shallow, candidate.manualOnly || current?.manualOnly == true { return "직접 골라야만 지우는 항목입니다" }
         if shallow, !(current.map { $0.isShallow && $0.targets == candidate.targets } ?? false) { return "다시 검사한 결과 얕은 정리 대상이 아닙니다" }
         if let current, !current.isSelectable { return "다시 검사한 결과 지금은 고를 수 없습니다" }
         if candidate.scannedAt.map({ Date.now.timeIntervalSince($0) > dependencies.resultLifetime }) ?? true { return "검사한 지 오래돼 다시 검사해야 합니다" }
@@ -249,6 +253,11 @@ actor CleanupExecutor {
                     return Self.describe(refusal)
                 }
                 if shallow, let refusal = Self.deepRefusal(target.path) { return refusal }
+                // A borrower in this same row goes first (the scan orders it so); any other one keeps the cache.
+                let others = borrowers(of: target.path).filter { file in
+                    !candidate.targets.contains { $0 != target && CheckoutAlternates.isInside(file, $0.path.path(percentEncoded: false)) }
+                }
+                if !others.isEmpty { return Self.lenderRefusal }
             case .deleteSimulator(let udid):
                 // A clone can keep its apps and data in this simulator's folder, and that cannot be read while both are
                 // shut down; only a person who saw the list deletes one.
@@ -294,6 +303,9 @@ actor CleanupExecutor {
                     guard let before = openFiles() else { firstError = firstError ?? "열린 파일을 확인하지 못했습니다"; break }
                     if let refusal = await ownerRefusal(candidate, open: before, tools: shallow) { firstError = firstError ?? refusal; break }
                 }
+                // A borrower that still reads from it, this row's included if it is not gone yet; read before the open
+                // files, since it reads every build cache's alternates files.
+                if !borrowers(of: target.path).isEmpty { firstError = firstError ?? Self.lenderRefusal; break }
                 guard let open = openFiles() else { firstError = firstError ?? "열린 파일을 확인하지 못했습니다"; break }
                 if open.anyOpen(under: target.path.path(percentEncoded: false)) { firstError = firstError ?? "지금 쓰는 파일이 있습니다"; break }
                 if Self.workspaceOpen(candidate, open) { firstError = firstError ?? "작업 공간에서 쓰는 파일이 있습니다"; break }
@@ -312,7 +324,8 @@ actor CleanupExecutor {
                 let check = { () async -> Bool in
                     if self.agesChanged(candidate) { return false }
                     if shallow, Self.deepRefusal(target.path) != nil { return false }
-                    guard let before = self.openFiles(fresh: true), await self.ownerRefusal(candidate, open: before) == nil,
+                    guard self.borrowers(of: target.path).isEmpty,
+                          let before = self.openFiles(fresh: true), await self.ownerRefusal(candidate, open: before) == nil,
                           let open = self.openFiles(), !open.anyOpen(under: target.path.path(percentEncoded: false)),
                           !Self.workspaceOpen(candidate, open) else { return false }
                     return PathGuard.check(target.path, inside: target.root, identity: target.identity, allowedRoots: roots,
@@ -367,6 +380,13 @@ actor CleanupExecutor {
     }
 
     static let agesRefusal = "정리 기준이 바뀌어 다시 검사해야 합니다"
+    static let lenderRefusal = "다른 캐시가 이 캐시의 패키지 기록을 빌려 씁니다"
+
+    /// Live borrowers of a build cache; none asked for a folder that lends no package objects.
+    private func borrowers(of folder: URL) -> [String] {
+        guard FileManager.default.fileExists(atPath: folder.appending(path: "SourcePackages/repositories").path(percentEncoded: false)) else { return [] }
+        return dependencies.liveBorrowers(PathGuard.realPath(folder) ?? folder.path(percentEncoded: false))
+    }
 
     /// Whether Settings now hold other clean-up ages than the scan judged the row by.
     private func agesChanged(_ candidate: CleanupCandidate) -> Bool { candidate.ages != dependencies.currentAges() }
