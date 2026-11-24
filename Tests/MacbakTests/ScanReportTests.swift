@@ -27,6 +27,40 @@ import Testing
             discovery: found, standardCaches: 3, memory: memory, lifts: 4, processes: processes)
     }
 
+    /// What the 2026-11-24 work added: rows nothing could tell, the person's rules, the disk summary and who picked it,
+    /// the answers for the folders asked about (no rule saved), and the virtual machines on the memory side.
+    @Test func theReportShowsWhatIsNewInOneLineEach() {
+        func kept(_ id: String, _ bytes: Int64, _ reason: String, ask: Bool) -> CleanupCandidate {
+            var evidence = Evidence()
+            evidence.protectedReason = reason
+            var row = CleanupCandidate(id: id, name: id, detail: "", symbol: "folder", bytes: bytes, evidence: evidence)
+            if ask { row.askInput = ExploreInput(url: URL(fileURLWithPath: "/x/\(id)"), relative: id, inside: "", beside: "") }
+            return row
+        }
+        let rows = [kept("u1", 2_000_000_000, CacheRules.unsureReason, ask: true), kept("u2", 1_000_000_000, CacheRules.modelUnsureReason, ask: false),
+                    kept("k", 5_000_000_000, "보호", ask: false), Self.row("r")]
+        let template = DiskNarrator.Narration(headline: .roomy, facts: [], byModel: false)
+        let lines = ScanReport.generalLines(rows: rows, rules: .rules(["a", "b"]), narration: template,
+                                            asked: [("u1", .proposal(evidence: "hash-named files")), ("x", .kept(evidence: "documents")),
+                                                    ("y", .unsure(reason: "기기 AI도 판단하지 못했습니다.")), ("z", nil)])
+        #expect(lines == [
+            "근거 부족: 2줄 · 3 GB · 기기 AI에게 물을 수 있음 1줄",
+            "사용자 규칙: 2개",
+            "디스크 요약(템플릿): 사용 가능 공간은 아직 넉넉합니다.",
+            "묻기 결과(규칙은 저장하지 않음): 4줄",
+            "  u1\t제안\thash-named files", "  x\t지킴\tdocuments", "  y\t판단 못 함\t기기 AI도 판단하지 못했습니다.", "  z\t답 없음(시간 초과)",
+        ])
+        let picked = DiskNarrator.Narration(headline: .tight, facts: [.init(id: .ready, text: "지워도 되는 것 1개, 2 GB", prompt: "", weight: 1)], byModel: true)
+        let other = ScanReport.generalLines(rows: [], rules: .unreadable, narration: picked, asked: [])
+        #expect(other.contains("사용자 규칙: 파일을 읽을 수 없음(규칙 없이 판정)"))
+        #expect(other.contains("디스크 요약(기기 AI가 고름): 사용 가능 공간이 부족합니다. / 지워도 되는 것 1개, 2 GB"))
+        #expect(ScanReport.generalLines(rows: [], rules: .none, narration: nil, asked: [("w", .unavailable(reason: "모델 없음 사유"))]).last == "  w\t모델 없음\t모델 없음 사유")
+        let none = ScanReport.generalLines(rows: [], rules: .none, narration: nil, asked: [])
+        #expect(none.contains("사용자 규칙: 없음") && none.contains("디스크 요약: 디스크를 읽지 못함"))
+        let machines = ScanReport.lines(Self.summary(processes: .init(helpersSummed: true, orphans: 2, idleSessions: 1, machines: 3)))
+        #expect(machines.contains { $0.hasPrefix("메모리 쪽:") && $0.hasSuffix(" · 가상 머신·에뮬레이터 3개") })
+    }
+
     @Test func everyExpandedAreaAndStateHasALine() {
         let text = ScanReport.lines(Self.summary()).joined(separator: "\n")
         for line in ["시뮬레이터 런타임: 2줄 · 고를 수 있음 1", "프로젝트 · Xcode 빌드 캐시: 1줄 · 고를 수 있음 1",

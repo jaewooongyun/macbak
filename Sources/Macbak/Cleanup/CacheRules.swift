@@ -122,7 +122,7 @@ enum CacheRules {
     /// Why a row stays when the on-device model could not tell either.
     static let modelUnsureReason = "기기 AI도 지워도 되는지 판단하지 못했습니다."
 
-    /// Kept only because nothing could tell what it is; the disk summary counts these.
+    /// Kept only because nothing could tell what it is; the disk summary and the scan report count these.
     static func isUnsure(_ row: CleanupCandidate) -> Bool {
         row.evidence.protectedReason.map { [unsureReason, modelUnsureReason].contains($0) } ?? false
     }

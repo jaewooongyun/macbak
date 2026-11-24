@@ -38,6 +38,27 @@ enum ScanReport {
 
         // The menu bar's immediate clean-up, from the disk areas and the AI tool caches together.
         let rows = coordinator.all + (storage.report?.candidates ?? [])
+
+        // The disk summary and the five largest folders nothing could tell, as the dashboard would show them after a
+        // click; nothing is approved, so no rule is saved.
+        let brief = SystemReader.disk().map {
+            DiskNarrator.brief(rows: rows, disk: $0, environment: coordinator.environment, discovery: coordinator.discovery)
+        }
+        var told = false
+        Task {
+            if let brief { await coordinator.narrator.narrate(brief) }
+            told = true
+        }
+        while !told { RunLoop.main.run(until: .now.addingTimeInterval(0.2)) }
+        let asked = Array(rows.filter { $0.askInput != nil }.sorted { $0.bytes > $1.bytes }.prefix(5))
+        coordinator.ask(Set(asked.map(\.id)))
+        let askStarted = Date.now
+        while coordinator.advisor.progress != nil, Date.now.timeIntervalSince(askStarted) < 600 { RunLoop.main.run(until: .now.addingTimeInterval(0.5)) }
+        print("")
+        for line in generalLines(rows: rows, rules: coordinator.rules(), narration: brief.map(coordinator.narrator.narration(for:)),
+                                 asked: asked.map { row in (row.name, row.askInput.flatMap { coordinator.advisor.answer(for: row.id, input: $0) }) }) {
+            print(line)
+        }
         let shallow = rows.filter(\.isShallow)
         print("\nAI storage rows: \(storage.report?.candidates.count ?? -1)")
         print("shallow: \(shallow.count) · \(shallow.reduce(0) { $0 + $1.bytes }.diskText)")
@@ -172,6 +193,36 @@ enum ScanReport {
                          + (side.idleSessions.map { "\($0)개" } ?? "읽지 못함") + " · 가상 머신·에뮬레이터 \(side.machines)개")
         } else {
             lines.append("메모리 쪽: 프로세스 목록을 읽지 못함")
+        }
+        return lines
+    }
+
+    /// What the 2026-11-24 work added, one line each: rows nothing could tell, the person's rules, the disk summary and
+    /// the answers for the folders asked about.
+    nonisolated static func generalLines(rows: [CleanupCandidate], rules: UserRuleStore.State, narration: DiskNarrator.Narration?,
+                                         asked: [(name: String, answer: RuleAdvisor.Answer?)]) -> [String] {
+        let unsure = rows.filter(CacheRules.isUnsure)
+        var lines = ["근거 부족: \(unsure.count)줄 · \(unsure.reduce(0) { $0 + $1.bytes }.diskText) · 기기 AI에게 물을 수 있음 \(rows.filter { $0.askInput != nil }.count)줄"]
+        switch rules {
+        case .none: lines.append("사용자 규칙: 없음")
+        case .unreadable: lines.append("사용자 규칙: 파일을 읽을 수 없음(규칙 없이 판정)")
+        case .rules(let paths): lines.append("사용자 규칙: \(paths.count)개")
+        }
+        if let narration {
+            lines.append("디스크 요약(" + (narration.byModel ? "기기 AI가 고름" : "템플릿") + "): " + narration.lines.joined(separator: " / "))
+        } else {
+            lines.append("디스크 요약: 디스크를 읽지 못함")
+        }
+        lines.append("묻기 결과(규칙은 저장하지 않음): \(asked.count)줄")
+        for (name, answer) in asked {
+            let said = switch answer {
+            case .proposal(let evidence)?: "제안\t" + evidence
+            case .kept(let evidence)?: "지킴\t" + evidence
+            case .unsure(let reason)?: "판단 못 함\t" + reason
+            case .unavailable(let reason)?: "모델 없음\t" + reason
+            case .asking?, nil: "답 없음(시간 초과)"
+            }
+            lines.append("  \(name)\t" + said)
         }
         return lines
     }

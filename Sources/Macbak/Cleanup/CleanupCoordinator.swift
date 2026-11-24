@@ -92,7 +92,7 @@ final class CleanupCoordinator {
     @ObservationIgnored private var pendingReproofs: [CleanupCandidate]?
     /// Looks at the rows the rules could not tell, after each scan.
     let explorer: CacheExplorer
-    /// The disk summary: the dashboard asks it through `summarize`; the loop and the menu bar never.
+    /// The disk summary: the dashboard asks it through `summarize` and `--scan-report` once; the loop and the menu bar never.
     let narrator: DiskNarrator
     /// Looks at a folder nothing could tell when a person asks (`ask`), and proposes a rule.
     let advisor: RuleAdvisor
