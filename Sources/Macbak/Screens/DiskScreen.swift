@@ -100,14 +100,23 @@ struct DiskScreen: View {
                 LegendRow(.quaternary, title: "사용 가능", value: disk.available.diskText, note: "\(disk.purgeable.diskText)는 macOS가 필요할 때 비움")
             }
             discoveryNote
+            if let text = Self.environmentText(cleanup.environment) {
+                Text(text).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+            }
         }
+    }
+
+    /// What the scan found this Mac is used for, in one line; nil before a scan or when nothing was found.
+    static func environmentText(_ environment: WorkEnvironment?) -> String? {
+        guard let environment, !environment.kinds.isEmpty else { return nil }
+        return "이 Mac에서 찾은 작업: " + environment.summary
     }
 
     @ViewBuilder
     private var scanStatus: some View {
         if !cleanup.scanning.isEmpty || storage.scanning {
             ProgressView().controlSize(.small)
-            Text("검사하는 중… 남은 영역 \(cleanup.scanning.count + (storage.scanning ? 1 : 0))곳")
+            Text("검사하는 중… 남은 영역 \(cleanup.scanning.filter { $0.applies(to: cleanup.environment) }.count + (storage.scanning ? 1 : 0))곳")
                 .font(.callout)
                 .foregroundStyle(.secondary)
         } else {

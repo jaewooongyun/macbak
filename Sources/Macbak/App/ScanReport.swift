@@ -23,6 +23,7 @@ enum ScanReport {
         }
         while !finished, Date.now.timeIntervalSince(started) < 900 { RunLoop.main.run(until: .now.addingTimeInterval(0.5)) }
         print(String(format: "scan: %.1fs%@", Date.now.timeIntervalSince(started), finished ? "" : " (timed out)"))
+        print("environment: " + (DiskScreen.environmentText(coordinator.environment) ?? "(찾은 작업 없음)"))
 
         // The on-device model looks after the scan; wait for it so its findings are part of the report.
         let exploreStarted = Date.now

@@ -16,6 +16,8 @@ struct ScanContext: Sendable {
     var borrowerMemory: BorrowerMemory?
     /// When the expanded scan stops judging: every walk and git call it makes ends by then. nil for the usual scan.
     var deadline: ContinuousClock.Instant?
+    /// What this Mac is used for, for what the screens show; no scanner judges by it.
+    var environment = WorkEnvironment()
 }
 
 enum ScanSupport {

@@ -6,6 +6,8 @@ struct MemoryScreen: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// Booted simulators; nil before the first read or when it failed.
     @State private var simulators: [BootedSimulator]?
+    /// What this Mac is used for, read when the screen appears; nil before that.
+    @State private var environment: WorkEnvironment?
     @State private var reading = false
     /// Simulators ticked to switch off, by UDID; the idle ones start ticked.
     @State private var picked: Set<String> = []
@@ -33,7 +35,9 @@ struct MemoryScreen: View {
                         .riseIn(1)
                         .gridSpan(2)
                         swapCard(memory).riseIn(3)
-                        simulatorCard.riseIn(4).gridSpan(2)
+                        if Self.showsSimulators(environment, simulators) {
+                            simulatorCard.riseIn(4).gridSpan(2)
+                        }
                         Card {
                             CardHeader("쓰지 않는 앱", symbol: "moon.zzz") {
                                 Text("직접 골라서 종료").font(.callout).foregroundStyle(.secondary)
@@ -189,6 +193,12 @@ struct MemoryScreen: View {
         }
     }
 
+    /// The simulator card belongs on a Mac with Apple development tools, or one where a simulator is on anyway; it is
+    /// shown while that is not known yet.
+    static func showsSimulators(_ environment: WorkEnvironment?, _ simulators: [BootedSimulator]?) -> Bool {
+        (environment?.has(.apple) ?? true) || !(simulators ?? []).isEmpty
+    }
+
     /// Memory held for nothing: simulators left booted that no test, debugger or recent launch is using.
     private var simulatorCard: some View {
         Card {
@@ -279,8 +289,10 @@ struct MemoryScreen: View {
 
     private func reload() async {
         reading = true
-        let found = await Task.detached(priority: .utility) { SimulatorMemory.read() }.value
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let (found, kinds) = await Task.detached(priority: .utility) { (SimulatorMemory.read(), WorkEnvironment.detect(home: home)) }.value
         simulators = found
+        environment = kinds
         picked = Set(found?.filter(\.isIdle).map(\.udid) ?? [])
         reading = false
     }

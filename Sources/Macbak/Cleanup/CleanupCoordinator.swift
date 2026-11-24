@@ -27,6 +27,16 @@ final class CleanupCoordinator {
             case .jobs: "끝난 AI 작업 임시 파일"
             }
         }
+
+        /// Whether the area means anything on a Mac used this way: Xcode's caches, device files, simulators and their
+        /// runtimes only where Apple development tools are, and every area while that is not known yet. Only what is
+        /// shown follows it; every area is still scanned.
+        func applies(to environment: WorkEnvironment?) -> Bool {
+            switch self {
+            case .xcode, .devices, .runtimes: environment?.has(.apple) ?? true
+            case .appCaches, .general, .projects, .jobs: true
+            }
+        }
     }
 
     /// What a scan reads; tests replace it to hold a scan open or to count what it calls.
@@ -58,6 +68,8 @@ final class CleanupCoordinator {
     /// The ages the latest finished scan judged by.
     private(set) var scannedAges: CleanupAges?
     private(set) var generation = 0
+    /// What this Mac is used for, as the latest usual scan found it; nil before one.
+    private(set) var environment: WorkEnvironment?
     /// When the latest expanded scan started; nil before one, or when Settings changed while it read.
     private(set) var projectsScannedAt: Date?
     /// The ages the latest finished expanded scan judged by.
@@ -206,6 +218,7 @@ final class CleanupCoordinator {
         explorer.cancel()
         scanning.formUnion(Area.regular)
         let context = await sources.context(ages)
+        environment = context.environment
         await scanAreas(Area.regular, context: context)
         generation += 1
         // Settings changed while it read: its rows were judged by other ages, so the result stays stale and the
@@ -438,6 +451,6 @@ final class CleanupCoordinator {
         let installed = Set(names.filter { $0.contains(".") && NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0) != nil })
         let openFiles = await Task.detached(priority: .utility) { OpenFiles.capture() }.value
         return ScanContext(home: home, now: .now, openFiles: openFiles, runningBundleIDs: running, installedBundleIDs: installed, ages: ages,
-                           borrowerMemory: .live())
+                           borrowerMemory: .live(), environment: WorkEnvironment.detect(home: home))
     }
 }
