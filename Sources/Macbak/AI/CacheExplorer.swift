@@ -81,7 +81,9 @@ final class CacheExplorer {
             for (index, item) in inputs.enumerated() {
                 guard !Task.isCancelled else { return }
                 self?.phase = .exploring(done: index, total: inputs.count, current: item.input.relative)
-                let finding = await Self.look(at: item.input)
+                // One model job at a time across the app; a job past its deadline counts as the model's error.
+                let finding = await ModelSlot.shared.run(.high, deadline: Self.itemDeadline) { await Self.look(at: item.input) }
+                    ?? Finding(offered: false, decision: "error", evidence: "")
                 guard !Task.isCancelled else { return }
                 if finding.offered, item.input.role == .offer { offered += 1 }
                 if finding.vetoes { kept += 1 }
@@ -90,6 +92,9 @@ final class CacheExplorer {
             self?.phase = .finished(looked: inputs.count, offered: offered, kept: kept)
         }
     }
+
+    /// How long one item may take. Measured 2026-11-03 at about 5.5 s an item on this kind of Mac.
+    nonisolated static let itemDeadline: Duration = .seconds(90)
 
     nonisolated static func unavailableReason() -> String? {
         #if canImport(FoundationModels)
