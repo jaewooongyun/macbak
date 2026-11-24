@@ -9,6 +9,7 @@ struct AIStorageScreen: View {
             candidates: storage.report?.candidates ?? [],
             title: "정리 후보",
             note: "실제 폴더를 검사해 크기와 판정을 보여 줍니다. 정리한 파일은 되돌릴 수 없고, 대화 기록은 표시만 합니다. 끝난 작업 임시 파일은 디스크 화면에서 골라 지울 수 있습니다.",
+            scanning: storage.scanning,
             onFinished: { Task { await storage.scan(using: monitor) } }
         ) { _ in
             summaryCard

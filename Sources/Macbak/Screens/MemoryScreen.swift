@@ -32,14 +32,6 @@ struct MemoryScreen: View {
                         }
                         .riseIn(1)
                         .gridSpan(2)
-                        if let pressure = memory.pressure {
-                            Card {
-                                CardHeader("메모리 압력", symbol: "gauge.with.dots.needle.67percent")
-                                StatusTag(pressure).font(.title3.weight(.semibold))
-                                Text(pressure.advice).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                            }
-                            .riseIn(2)
-                        }
                         swapCard(memory).riseIn(3)
                         simulatorCard.riseIn(4).gridSpan(2)
                         Card {
@@ -73,11 +65,15 @@ struct MemoryScreen: View {
             }
             .readableColumn()
         }
+        .softScrollEdges()
         .floatingBottomBar {
-            shutdownBar
-                .padding(.horizontal, 24)
-                .padding(.top, 8)
-                .padding(.bottom, 18)
+            // Nothing picked and nothing running: no bar with a dead button over the list.
+            if hasPicks || run != nil {
+                shutdownBar
+                    .padding(.horizontal, 24)
+                    .padding(.top, 8)
+                    .padding(.bottom, 18)
+            }
         }
         .confirmationDialog(confirmTitle, isPresented: $confirming) {
             Button("정리", role: .destructive) { clean(pickedSimulators, chosenApps, chosenOrphans, chosenSessions) }
@@ -241,6 +237,10 @@ struct MemoryScreen: View {
         }
     }
 
+    private var hasPicks: Bool {
+        !pickedSimulators.isEmpty || !chosenApps.isEmpty || !chosenOrphans.isEmpty || !chosenSessions.isEmpty
+    }
+
     /// The ticked simulators and apps beside "정리…"; confirming morphs the capsule into the run panel.
     private var shutdownBar: some View {
         let simulators = pickedSimulators
@@ -255,21 +255,22 @@ struct MemoryScreen: View {
                      orphans.isEmpty ? nil : "개발 도구 \(orphans.count)개", sessions.isEmpty ? nil : "AI 세션 \(sessions.count)개"].compactMap(\.self)
         return RunBar(
             actionTitle: "정리…",
-            canRun: !parts.isEmpty && run == nil,
+            canRun: run == nil,
             run: run,
             wording: .memoryCleanup,
             total: { UInt64($0).memoryText },
             start: { confirming = true },
             close: {
-                withAnimation(reduceMotion ? nil : .bouncy(duration: 0.35)) { run = nil }
+                withAnimation(reduceMotion ? nil : Theme.morph) { run = nil }
                 Task { await reload() }
             }
         ) {
             VStack(alignment: .leading, spacing: 1) {
-                Text(parts.isEmpty ? "정리할 것이 없습니다" : "약 " + bytes.memoryText)
+                // The bar shows only with something picked (or a run going), so there is always a sum here.
+                Text("약 " + bytes.memoryText)
                     .font(Theme.numeral(20))
                     .monospacedDigit()
-                Text(parts.isEmpty ? "쓰지 않는 시뮬레이터나 고른 앱이 여기에 모입니다" : parts.joined(separator: " · ") + " · 지금 차지한 메모리")
+                Text(parts.joined(separator: " · ") + " · 지금 차지한 메모리")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
@@ -287,7 +288,7 @@ struct MemoryScreen: View {
     /// Switches the simulators off, asks the apps and then the orphaned tools to quit, and reports the memory change
     /// measured around all of it.
     private func clean(_ simulators: [BootedSimulator], _ apps: [AppMemory], _ orphans: [OrphanProcess], _ sessions: [IdleSession]) {
-        withAnimation(reduceMotion ? nil : .bouncy(duration: 0.4)) {
+        withAnimation(reduceMotion ? nil : Theme.morph) {
             run = RunProgress(steps: simulators.map(\.runStep) + apps.map(\.runStep) + orphans.map(\.runStep) + sessions.map(\.runStep))
         }
         let sessionEnding = AISessions.Ending.live(idleAge: system.sessionIdleAge)
@@ -369,6 +370,9 @@ struct MemoryScreen: View {
                     LegendRow(.tertiary, title: "기타", value: memory.other.memoryText, note: "위 항목으로 나누지 못한 나머지")
                 }
             }
+            if let pressure = memory.pressure {
+                Text(pressure.advice).font(.callout).fixedSize(horizontal: false, vertical: true)
+            }
             Text("사용 중 = 앱 메모리 + 고정 메모리 + 압축됨. 활성 상태 보기(Activity Monitor)와 같은 방식으로 계산한 근사값입니다.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
@@ -404,6 +408,7 @@ struct IdleAppList: View {
     let apps: [IdleApp]
     @Binding var picked: AppPicks
     let enabled: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         if apps.isEmpty {
@@ -432,13 +437,14 @@ struct IdleAppList: View {
                     }
                 }
             }
-            .animation(.smooth, value: apps.map(\.id))
+            .animation(reduceMotion ? nil : Theme.stateChange, value: apps.map(\.id))
         }
     }
 }
 
 struct AppUsageList: View {
     let apps: [AppMemory]
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         if apps.isEmpty {
@@ -453,14 +459,14 @@ struct AppUsageList: View {
                         }
                         .frame(width: 24, height: 24)
                         Text(app.name).font(.body).lineLimit(1).frame(minWidth: 90, maxWidth: 170, alignment: .leading)
-                        MeterBar(fraction: Double(app.total) / largest, tint: .blue)
+                        MeterBar(fraction: Double(app.total) / largest, tint: Color.secondary.opacity(0.6))
                         Text(app.totalText)
                             .font(.body.monospacedDigit())
                             .frame(width: 72, alignment: .trailing)
                     }
                 }
             }
-            .animation(.smooth, value: apps.map(\.total))
+            .animation(reduceMotion ? nil : Theme.stateChange, value: apps.map(\.total))
         }
     }
 }
@@ -482,7 +488,7 @@ struct MemoryChart: View {
         Chart {
             ForEach(history) { sample in
                 AreaMark(x: .value("시점", sample.id), y: .value("사용 중", Double(sample.used) / Self.gib))
-                    .foregroundStyle(LinearGradient(colors: [tint.opacity(0.3), tint.opacity(0.02)], startPoint: .top, endPoint: .bottom))
+                    .foregroundStyle(LinearGradient(colors: [tint.opacity(0.14), tint.opacity(0)], startPoint: .top, endPoint: .bottom))
                     .interpolationMethod(.monotone)
                 LineMark(x: .value("시점", sample.id), y: .value("사용 중", Double(sample.used) / Self.gib))
                     .foregroundStyle(tint)

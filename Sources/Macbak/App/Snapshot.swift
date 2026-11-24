@@ -58,6 +58,10 @@ enum SnapshotRunner {
                     let view = ContentView(selection: screen).environment(system).environment(loop).environment(ai).environment(aiStorage)
                         .environment(cleanup).environment(CleanupRunner()).environment(AppNavigation())
                     failures += render(view, size: NSSize(width: 1180, height: 3600), look: look, to: outputDirectory.appendingPathComponent("disk-\(name)-tall.png"))
+                    // The narrowest window too, where the folded group's icons must still sit on the list rows' column.
+                    if name == "light" {
+                        failures += render(view, size: NSSize(width: 760, height: 3600), look: look, to: outputDirectory.appendingPathComponent("disk-light-min-tall.png"))
+                    }
                 }
             }
             // .zero = size to fit, the way the real menu bar panel sizes itself (a fixed height hid a truncation bug).

@@ -105,6 +105,8 @@ struct CleanupBoard<Header: View>: View {
     let candidates: [CleanupCandidate]
     let title: String
     let note: String
+    /// A scan is running: while no row has arrived yet, the list's place shows that instead of standing empty.
+    var scanning = false
     /// Called after a run, so the owner can scan again and show what is left.
     var onFinished: () -> Void = {}
     let header: (_ selectedBytes: Int64) -> Header
@@ -129,11 +131,12 @@ struct CleanupBoard<Header: View>: View {
     /// A group longer than this starts folded when nothing in it can be ticked.
     private static var foldAbove: Int { 6 }
 
-    init(candidates: [CleanupCandidate], title: String, note: String, onFinished: @escaping () -> Void = {},
+    init(candidates: [CleanupCandidate], title: String, note: String, scanning: Bool = false, onFinished: @escaping () -> Void = {},
          @ViewBuilder header: @escaping (_ selectedBytes: Int64) -> Header) {
         self.candidates = candidates
         self.title = title
         self.note = note
+        self.scanning = scanning
         self.onFinished = onFinished
         self.header = header
         _selected = State(initialValue: Self.preselected(candidates))
@@ -155,6 +158,11 @@ struct CleanupBoard<Header: View>: View {
                 if let lastReport, run == nil {
                     resultBanner(lastReport).transition(.move(edge: .top).combined(with: .opacity))
                 }
+                if remaining.isEmpty && scanning {
+                    ProgressView("검사하는 중…")
+                        .controlSize(.small)
+                        .frame(maxWidth: .infinity, minHeight: 120)
+                }
                 ForEach(Array(CleanupStatus.allCases.enumerated()), id: \.element) { index, status in
                     let items = remaining.filter { $0.verdict.status == status }
                     if !items.isEmpty { section(status, items).riseIn(2 + index) }
@@ -162,6 +170,7 @@ struct CleanupBoard<Header: View>: View {
             }
             .readableColumn()
         }
+        .softScrollEdges()
         // Floats over the list: rows scroll underneath, which is what the glass is for.
         .floatingBottomBar {
             selectionBar
@@ -194,7 +203,8 @@ struct CleanupBoard<Header: View>: View {
 
     /// The run panel's words: while the run waits for a scan in progress it says it will delete once that ends.
     static func wording(settling: Bool) -> RunWording {
-        settling ? RunWording(running: "진행 중인 검사가 끝나면 지웁니다", finished: RunWording.cleanup.finished, note: RunWording.cleanup.note) : .cleanup
+        settling ? RunWording(running: "진행 중인 검사가 끝나면 지웁니다", finished: RunWording.cleanup.finished, note: RunWording.cleanup.note,
+                              symbol: RunWording.cleanup.symbol) : .cleanup
     }
 
     /// The ticks after rows came or went: ticks on rows still listed stay as the person left them, a new row ticked to
@@ -279,8 +289,10 @@ struct CleanupBoard<Header: View>: View {
         let largest = items.sorted { $0.bytes > $1.bytes }.prefix(3)
         return VStack(alignment: .leading, spacing: 6) {
             ForEach(Array(largest)) { item in
-                HStack(spacing: 10) {
-                    Image(systemName: item.symbol).foregroundStyle(.secondary).frame(width: 20)
+                // The list rows' columns: the checkbox's room, then the 28pt icon, so the icons line up with the rows above.
+                HStack(spacing: 14) {
+                    Color.clear.frame(width: 14, height: 1)
+                    Image(systemName: item.symbol).font(.title3).foregroundStyle(.secondary).frame(width: 28)
                     Text(item.name).font(.callout.weight(.medium)).lineLimit(1)
                     Text(item.verdict.reason).font(.callout).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
                     Spacer(minLength: 8)
@@ -289,9 +301,12 @@ struct CleanupBoard<Header: View>: View {
             }
             if items.count > largest.count {
                 Text("그 밖에 \(items.count - largest.count)개").font(.callout).foregroundStyle(.tertiary)
+                    .padding(.leading, 14 + 14 + 28 + 14)
             }
         }
-        .padding(14)
+        // The list's card inset (4) plus the row's own (14).
+        .padding(.vertical, 14)
+        .padding(.horizontal, 18)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(CardBackground())
     }
@@ -307,7 +322,7 @@ struct CleanupBoard<Header: View>: View {
             total: { Int64($0).diskText },
             start: { pending = Pending(items: selectedItems) },
             close: {
-                withAnimation(reduceMotion ? nil : .bouncy(duration: 0.35)) { run = nil }
+                withAnimation(reduceMotion ? nil : Theme.morph) { run = nil }
                 onFinished()
             },
             stop: { runner.stop() },
@@ -336,7 +351,7 @@ struct CleanupBoard<Header: View>: View {
 
     /// Deletes for real. Each finished item ticks off and leaves the list; skipped ones stay with their reason.
     private func perform(_ items: [CleanupCandidate]) {
-        withAnimation(reduceMotion ? nil : .bouncy(duration: 0.4)) {
+        withAnimation(reduceMotion ? nil : Theme.morph) {
             lastReport = nil
             settleText = nil
             run = RunProgress(steps: items.map(\.runStep))

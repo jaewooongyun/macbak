@@ -7,6 +7,7 @@ struct DiskScreen: View {
     @Environment(CleanupCoordinator.self) private var cleanup
     @Environment(AIStorage.self) private var storage
     @Environment(AIMonitor.self) private var ai
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var confirmingTrash = false
     @State private var emptyingTrash = false
     /// What the last emptying reported.
@@ -17,6 +18,7 @@ struct DiskScreen: View {
             candidates: cleanup.all + (storage.report?.candidates ?? []),
             title: "정리 후보",
             note: "이 Mac을 실제로 검사해 세 묶음으로 나눴습니다. 여기서는 고른 뒤 \"정리…\"를 눌러야 지웁니다. 클릭 없이 지우는 것은 메뉴 막대의 즉시 정리와 켜 둔 정기 정리뿐이고, 둘 다 얕은 정리 대상만 지웁니다. 지운 파일은 되돌릴 수 없습니다.",
+            scanning: !cleanup.scanning.isEmpty || storage.scanning,
             onFinished: refresh
         ) { selectedBytes in
             VStack(alignment: .leading, spacing: 20) {
@@ -31,7 +33,7 @@ struct DiskScreen: View {
             }
             // Only the card's arrival and departure animate; its progress changes every few seconds and snaps, so the
             // cards around it are not re-laid out and redrawn for each item the model looks at.
-            .animation(.smooth, value: cleanup.explorer.phase != .idle)
+            .animation(reduceMotion ? nil : Theme.stateChange, value: cleanup.explorer.phase != .idle)
         }
         // The usual and the expanded scan together, when either result is old; the coordinator decides.
         .task {
@@ -105,7 +107,7 @@ struct DiskScreen: View {
     private var scanStatus: some View {
         if !cleanup.scanning.isEmpty || storage.scanning {
             ProgressView().controlSize(.small)
-            Text("검사하는 중… " + CleanupCoordinator.Area.allCases.filter { cleanup.scanning.contains($0) }.map(\.title).joined(separator: "·"))
+            Text("검사하는 중… 남은 영역 \(cleanup.scanning.count + (storage.scanning ? 1 : 0))곳")
                 .font(.callout)
                 .foregroundStyle(.secondary)
         } else {

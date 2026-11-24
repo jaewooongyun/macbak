@@ -43,11 +43,15 @@ struct RunWording {
     let finished: String
     /// Says what the run really does.
     let note: String
+    /// The mark in the middle of the progress ring while the run goes: what kind of work it is.
+    let symbol: String
 
-    static let cleanup = RunWording(running: "지우는 중…", finished: "정리 끝", note: "휴지통을 거치지 않고 지웁니다")
-    static let memoryCleanup = RunWording(running: "정리하는 중…", finished: "정리 끝", note: "시뮬레이터는 끄고, 앱에는 정상 종료를 요청합니다")
-    static let shutdownSimulators = RunWording(running: "시뮬레이터를 끄는 중…", finished: "끄기 끝", note: "기기와 데이터는 그대로, 실행 중이던 앱만 닫힘")
-    static let emptyTrash = RunWording(running: "휴지통을 비우는 중…", finished: "비우기 끝", note: "Finder가 휴지통의 모든 파일을 지웁니다")
+    static let cleanup = RunWording(running: "지우는 중…", finished: "정리 끝", note: "휴지통을 거치지 않고 지웁니다", symbol: "eraser")
+    static let memoryCleanup = RunWording(running: "정리하는 중…", finished: "정리 끝", note: "시뮬레이터는 끄고, 앱에는 정상 종료를 요청합니다",
+                                          symbol: "memorychip")
+    static let shutdownSimulators = RunWording(running: "시뮬레이터를 끄는 중…", finished: "끄기 끝", note: "기기와 데이터는 그대로, 실행 중이던 앱만 닫힘",
+                                               symbol: "power")
+    static let emptyTrash = RunWording(running: "휴지통을 비우는 중…", finished: "비우기 끝", note: "Finder가 휴지통의 모든 파일을 지웁니다", symbol: "trash")
 }
 
 extension AppMemory {
@@ -127,7 +131,7 @@ struct RunPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(spacing: 18) {
-                ProgressRing(progress: run.progress, finished: run.finished)
+                ProgressRing(progress: run.progress, finished: run.finished, symbol: wording.symbol)
                     .frame(width: 64, height: 64)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(run.finished ? wording.finished : wording.running)
@@ -183,6 +187,7 @@ struct RunPanel: View {
 private struct ProgressRing: View {
     let progress: Double
     let finished: Bool
+    let symbol: String
 
     var body: some View {
         ZStack {
@@ -191,7 +196,7 @@ private struct ProgressRing: View {
                 .trim(from: 0, to: max(progress, 0.001))
                 .stroke(.green, style: StrokeStyle(lineWidth: 6, lineCap: .round))
                 .rotationEffect(.degrees(-90))
-            Image(systemName: finished ? "checkmark" : "arrow.down")
+            Image(systemName: finished ? "checkmark" : symbol)
                 .font(.title2.weight(.semibold))
                 .foregroundStyle(finished ? AnyShapeStyle(.green) : AnyShapeStyle(.secondary))
                 .contentTransition(.symbolEffect(.replace))
