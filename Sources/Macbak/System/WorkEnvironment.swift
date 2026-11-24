@@ -4,7 +4,7 @@ import Foundation
 /// What a person uses this Mac for, told from where tools keep their files: each kind is a few home folders and app
 /// names whose existence alone says the tool is installed or has been used here. Nothing is run and no folder is
 /// opened, apart from listing the application folders' names.
-/// - Note: It only changes what is shown: which clean-up areas are named and the simulator card. Scans
+/// - Note: It only changes what is shown: which clean-up areas are named, the simulator card, the disk summary. Scans
 ///   and verdicts never depend on it, so a wrong guess shows a line too many or too few and never deletes anything.
 struct WorkEnvironment: Equatable, Sendable {
     enum Kind: String, CaseIterable, Sendable {

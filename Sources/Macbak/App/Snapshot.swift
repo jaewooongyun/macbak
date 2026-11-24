@@ -39,8 +39,11 @@ enum SnapshotRunner {
         print("  tools:", ai.tools.map { "\($0.tool.name) p\($0.processes) s\($0.sessions)" }.joined(separator: ", "))
 
         // Fixture candidates: rendering must never scan or touch the real clean-up targets.
+        // The summary as the model would pick it, without asking the model: either tight or roomy is always true.
+        let roomy = system.disk.map { $0.available * 10 >= $0.total } ?? true
         let cleanup = CleanupCoordinator(fixture: [.xcode: CleanupCandidate.samples, .general: CleanupCandidate.generalSamples],
-                                         explorer: CacheExplorer(fixture: .exploring(done: 2, total: 4, current: ".cache/codex-runtimes")))
+                                         explorer: CacheExplorer(fixture: .exploring(done: 2, total: 4, current: ".cache/codex-runtimes")),
+                                         narrator: DiskNarrator(fixture: .init(headline: roomy ? .roomy : .tight, facts: [.kept1, .ready, .unsure])))
 
         let looks: [(String, NSAppearance.Name)] = [("light", .aqua), ("dark", .darkAqua)]
         // Default size plus the window's minimum and a wide window, to check how layouts respond to width.

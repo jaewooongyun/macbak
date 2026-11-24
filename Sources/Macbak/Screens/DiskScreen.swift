@@ -25,6 +25,9 @@ struct DiskScreen: View {
                 if let disk = system.disk {
                     capacityCard(disk, projected: min(selectedBytes, disk.used))
                 }
+                if let brief {
+                    summaryCard(cleanup.narrator.narration(for: brief))
+                }
                 if cleanup.explorer.phase != .idle {
                     ExploreCard(phase: cleanup.explorer.phase)
                         .transition(.opacity.combined(with: .move(edge: .top)))
@@ -43,6 +46,41 @@ struct DiskScreen: View {
             if storage.isStale {
                 await ai.wake()
                 await storage.scan(using: ai)
+            }
+        }
+        // Once per set of facts, after every scan and the explorer; leaving the screen cancels it.
+        .task(id: askKey) {
+            if askKey != nil { await cleanup.summarize { brief } }
+        }
+    }
+
+    /// The summary's facts, from the same rows the board lists; nil until the disk is read and the usual scan is done.
+    private var brief: DiskNarrator.Brief? {
+        guard let disk = system.disk, cleanup.scannedAt != nil,
+              !CleanupCoordinator.Area.regular.contains(where: cleanup.scanning.contains) else { return nil }
+        return DiskNarrator.brief(rows: cleanup.all + (storage.report?.candidates ?? []), disk: disk,
+                                  environment: cleanup.environment, discovery: cleanup.discovery)
+    }
+
+    /// When the model may be asked: no scan runs and the explorer is done.
+    private var askKey: DiskNarrator.Brief.Key? {
+        guard cleanup.scanning.isEmpty, !storage.scanning, !cleanup.explorer.isExploring else { return nil }
+        return brief?.key
+    }
+
+    private func summaryCard(_ narration: DiskNarrator.Narration) -> some View {
+        Card {
+            CardHeader("디스크 요약", symbol: "text.alignleft") {
+                Text(narration.byModel ? "기기 AI가 고른 요약 · 숫자는 검사 결과" : "검사 결과 요약")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Text(narration.headline.text).font(.headline)
+            ForEach(narration.facts) { fact in
+                Text(fact.text)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }

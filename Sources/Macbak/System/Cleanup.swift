@@ -127,9 +127,11 @@ struct ExploreInput: Sendable, Hashable {
 }
 
 extension CleanupCandidate {
-    /// Sample rows only — nothing here is read from or applied to the disk.
+    /// Sample rows only — nothing here is read from or applied to the disk. Targets point nowhere real; a scanned row always
+    /// has one, and the disk summary counts only rows with something to delete.
     static let samples: [CleanupCandidate] = {
         let checked = Evidence(verified: true, inUse: false, regenerable: true)
+        let nowhere = [CleanupTarget(path: URL(fileURLWithPath: "/nonexistent/sample/b"), root: URL(fileURLWithPath: "/nonexistent/sample"), identity: nil, action: .removeItem)]
         func gb(_ value: Double) -> Int64 { Int64(value * 1_000_000_000) }
         func with(_ change: (inout Evidence) -> Void) -> Evidence {
             var e = checked
@@ -148,7 +150,11 @@ extension CleanupCandidate {
             CleanupCandidate(id: "xcode-active", name: "지금 프로젝트의 빌드 캐시", detail: "Xcode · 진행 중인 빌드가 사용", symbol: "hammer.fill", bytes: gb(19.8), evidence: with { $0.inUse = true }),
             CleanupCandidate(id: "system", name: "용도를 확인하지 못한 시스템 데이터", detail: "macOS · 지원하는 규칙이 없음", symbol: "questionmark.folder", bytes: gb(53.2), evidence: with { $0.verified = nil }),
             CleanupCandidate(id: "browser-hot", name: "매일 쓰는 브라우저 캐시", detail: "Chrome · 사용 빈도가 높음", symbol: "arrow.clockwise", bytes: gb(2.4), evidence: with { $0.frequentlyRecreated = true }),
-        ]
+        ].map { sample in
+            var sample = sample
+            sample.targets = nowhere
+            return sample
+        }
     }()
 
     /// Sample rows of the general area, for snapshots: a ready cache, choices from the rules and from the on-device model,

@@ -92,24 +92,28 @@ final class CleanupCoordinator {
     @ObservationIgnored private var pendingReproofs: [CleanupCandidate]?
     /// Looks at the rows the rules could not tell, after each scan.
     let explorer: CacheExplorer
+    /// The disk summary: the dashboard asks it through `summarize`; the loop and the menu bar never.
+    let narrator: DiskNarrator
     /// Whether a clean-up is deleting now. A scan waits for it to finish, so no new hold or verdict lands on rows a run
     /// was handed; together with the runner waiting for a scan in progress, scans and runs never overlap.
     @ObservationIgnored var isDeleting: @MainActor () -> Bool = { false }
     /// The clock the freshness checks read; tests move it.
     @ObservationIgnored var now: () -> Date = { .now }
 
-    init(settings: CleanupSettings? = nil, scanning: Scanning = Scanning()) {
+    init(settings: CleanupSettings? = nil, scanning: Scanning = Scanning(), narrator: DiskNarrator = DiskNarrator()) {
         scansDisk = true
         explorer = CacheExplorer()
+        self.narrator = narrator
         self.settings = settings
         sources = scanning
     }
 
-    init(fixture: [Area: [CleanupCandidate]], explorer: CacheExplorer = CacheExplorer()) {
+    init(fixture: [Area: [CleanupCandidate]], explorer: CacheExplorer = CacheExplorer(), narrator: DiskNarrator = DiskNarrator()) {
         candidates = fixture
         scannedAt = .now
         scansDisk = false
         self.explorer = explorer
+        self.narrator = narrator
         settings = nil
         sources = Scanning()
     }
@@ -366,6 +370,14 @@ final class CleanupCoordinator {
         }
     }
 
+    /// Asks for the disk summary once no scan runs and the explorer is done, so the summary never holds the model while
+    /// rows wait on the explorer. `brief` is read after that wait, from the rows as they are then.
+    func summarize(_ brief: () -> DiskNarrator.Brief?) async {
+        await settled()
+        guard !Task.isCancelled, !explorer.isExploring, let brief = brief() else { return }
+        await narrator.narrate(brief)
+    }
+
     /// Waits for a scan in progress, so a run starts on settled verdicts.
     func settled() async {
         if let current { await current.value }
@@ -394,7 +406,7 @@ final class CleanupCoordinator {
                 evidence.costReason = "기기 AI가 다시 만들어지는 캐시로 봤습니다. 내용을 확인하고 고르세요."
             } else {
                 evidence.protectedReason = finding.decision == "userData"
-                    ? "기기 AI가 사용자 데이터로 봤습니다." : "기기 AI도 지워도 되는지 판단하지 못했습니다."
+                    ? "기기 AI가 사용자 데이터로 봤습니다." : CacheRules.modelUnsureReason
             }
         case .veto:
             evidence.awaitingModel = false

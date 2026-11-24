@@ -42,6 +42,11 @@ final class CacheExplorer {
     }
 
     private(set) var phase: Phase = .idle
+
+    var isExploring: Bool {
+        if case .exploring = phase { return true }
+        return false
+    }
     @ObservationIgnored private var task: Task<Void, Never>?
     /// Why the model cannot run here, or nil when it can.
     private let unavailable: @Sendable () -> String?

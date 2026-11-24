@@ -69,8 +69,18 @@ enum CacheRules {
         case "chromium state": return "로그인·북마크 같은 브라우저 상태입니다."
         case "settings file": return "설정 파일입니다."
         case "user-like name in a cache or log area": return "캐시 위치지만 사용자 데이터로 보이는 이름이 있습니다."
-        default: return "무엇인지 판단할 근거가 부족해 지우지 않습니다."
+        default: return unsureReason
         }
+    }
+
+    /// Why a row stays when no rule could tell what it is.
+    static let unsureReason = "무엇인지 판단할 근거가 부족해 지우지 않습니다."
+    /// Why a row stays when the on-device model could not tell either.
+    static let modelUnsureReason = "기기 AI도 지워도 되는지 판단하지 못했습니다."
+
+    /// Kept only because nothing could tell what it is; the disk summary counts these.
+    static func isUnsure(_ row: CleanupCandidate) -> Bool {
+        row.evidence.protectedReason.map { [unsureReason, modelUnsureReason].contains($0) } ?? false
     }
 
     /// Where Apple (Caches), the XDG convention (~/.cache) or the folder's purpose (Logs) promise re-creatable contents.
