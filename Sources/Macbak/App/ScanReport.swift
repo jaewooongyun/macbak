@@ -117,6 +117,8 @@ enum ScanReport {
             var orphans: Int
             /// nil when the sessions folder could not be read.
             var idleSessions: Int?
+            /// Virtual machines and emulators running.
+            var machines = 0
         }
 
         var runtimes: [CleanupCandidate]
@@ -167,7 +169,7 @@ enum ScanReport {
         lines.append("다시 증명한 보통 줄: \(summary.lifts)개")
         if let side = summary.processes {
             lines.append("메모리 쪽: 보조 프로세스 합산 " + (side.helpersSummed ? "가능" : "불가") + " · 주인 없는 개발 도구 \(side.orphans)개 · 오래 쉬는 AI 세션 "
-                         + (side.idleSessions.map { "\($0)개" } ?? "읽지 못함"))
+                         + (side.idleSessions.map { "\($0)개" } ?? "읽지 못함") + " · 가상 머신·에뮬레이터 \(side.machines)개")
         } else {
             lines.append("메모리 쪽: 프로세스 목록을 읽지 못함")
         }
@@ -181,6 +183,7 @@ enum ScanReport {
         between()
         let second = sources.read(previous: first.snapshot, apps: apps, idleAge: idleAge)
         guard second.snapshot != nil else { return nil }
-        return Summary.Processes(helpersSummed: second.owners != nil, orphans: second.orphans.count, idleSessions: second.sessions?.count)
+        return Summary.Processes(helpersSummed: second.owners != nil, orphans: second.orphans.count, idleSessions: second.sessions?.count,
+                                 machines: second.machines.count)
     }
 }

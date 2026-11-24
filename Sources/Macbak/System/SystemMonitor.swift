@@ -279,6 +279,8 @@ final class SystemMonitor {
     private(set) var orphans: [OrphanProcess] = []
     /// Claude sessions idle past the Settings age, while the memory screen is shown.
     private(set) var idleSessions: [IdleSession] = []
+    /// Virtual machines and emulators running, largest first, while the memory screen is shown.
+    private(set) var machines: [DevMachine] = []
     /// The Settings age past which an idle AI session is offered.
     var sessionIdleAge: TimeInterval { ages().seconds(.aiSessionIdle) }
     @ObservationIgnored private let ages: @MainActor () -> CleanupAges
@@ -312,6 +314,7 @@ final class SystemMonitor {
             var orphans: [OrphanProcess] = []
             /// nil when the sessions folder could not be read.
             var sessions: [IdleSession]?
+            var machines: [DevMachine] = []
         }
 
         /// - Parameters:
@@ -326,9 +329,10 @@ final class SystemMonitor {
                                                 store: store, idleAge: idleAge, now: .now, names: AISessions.names))
                 }
             }
-            return Reading(snapshot: snapshot, owners: responsible.map { ProcessOwnership.owners(snapshot, responsible: $0) },
+            let owners = responsible.map { ProcessOwnership.owners(snapshot, responsible: $0) }
+            return Reading(snapshot: snapshot, owners: owners,
                            orphans: OrphanProcesses.candidates(.init(snapshot: snapshot, services: services(), apps: apps, home: NSHomeDirectory(), now: .now)),
-                           sessions: sessions)
+                           sessions: sessions, machines: DevMachines.find(snapshot, owners: owners?.owner, apps: apps))
         }
     }
 
@@ -404,6 +408,7 @@ final class SystemMonitor {
         processes = reading.snapshot
         orphans = reading.orphans
         idleSessions = reading.sessions ?? []
+        machines = reading.machines
     }
 
     private func show(_ fresh: [AppMemory]) {
@@ -414,6 +419,7 @@ final class SystemMonitor {
             processes = nil
             orphans = []
             idleSessions = []
+            machines = []
         }
     }
 

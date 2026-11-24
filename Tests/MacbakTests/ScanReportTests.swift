@@ -34,7 +34,7 @@ import Testing
                      "끝난 AI 작업 임시 파일: 1줄 · 고를 수 있음 1", "확장 탐색: 폴더 1234개 · 끝까지 탐색",
                      "검사하지 않은 곳: Library · git 목록을 못 읽은 프로젝트 1곳", "차용 지도 범위: 표준 빌드 캐시 3곳 + 찾은 빌드 캐시 2곳",
                      "차용 기억: 없음", "다시 증명한 보통 줄: 4개",
-                     "메모리 쪽: 보조 프로세스 합산 가능 · 주인 없는 개발 도구 2개 · 오래 쉬는 AI 세션 1개"] {
+                     "메모리 쪽: 보조 프로세스 합산 가능 · 주인 없는 개발 도구 2개 · 오래 쉬는 AI 세션 1개 · 가상 머신·에뮬레이터 0개"] {
             #expect(text.contains(line), "\(line)")
         }
         #expect(!text.contains("secret-name") && !text.contains("/r/") && !text.contains("/x/"))
@@ -47,7 +47,7 @@ import Testing
         #expect(ScanReport.lines(Self.summary(memory: .edges([edge]))).contains("차용 기억: 정상 · 연결 1개"))
         #expect(ScanReport.lines(Self.summary(processes: nil)).contains("메모리 쪽: 프로세스 목록을 읽지 못함"))
         let unread = ScanReport.Summary.Processes(helpersSummed: false, orphans: 0, idleSessions: nil)
-        #expect(ScanReport.lines(Self.summary(processes: unread)).contains("메모리 쪽: 보조 프로세스 합산 불가 · 주인 없는 개발 도구 0개 · 오래 쉬는 AI 세션 읽지 못함"))
+        #expect(ScanReport.lines(Self.summary(processes: unread)).contains("메모리 쪽: 보조 프로세스 합산 불가 · 주인 없는 개발 도구 0개 · 오래 쉬는 AI 세션 읽지 못함 · 가상 머신·에뮬레이터 0개"))
     }
 
     final class Counter: @unchecked Sendable {

@@ -53,6 +53,9 @@ struct MemoryScreen: View {
                         if !system.orphans.isEmpty {
                             orphanCard.riseIn(5).gridSpan(2)
                         }
+                        if Self.showsMachines(system.machines) {
+                            machineCard.riseIn(5).gridSpan(2)
+                        }
                         if !system.idleSessions.isEmpty {
                             sessionCard.riseIn(5).gridSpan(2)
                         }
@@ -124,6 +127,35 @@ struct MemoryScreen: View {
             lines.append("세션이 띄운 보조 프로세스도 함께 끝냅니다. 잠든 채 기다리는 긴 작업도 쉬는 것으로 보일 수 있습니다.")
         }
         return lines.joined(separator: "\n")
+    }
+
+    /// The machine card is there only while a virtual machine or an emulator runs.
+    static func showsMachines(_ machines: [DevMachine]) -> Bool { !machines.isEmpty }
+
+    /// Virtual machines and emulators, with how to stop each in its own tool. Shown only: nothing here stops them.
+    private var machineCard: some View {
+        Card {
+            CardHeader("가상 머신·에뮬레이터", symbol: "shippingbox") {
+                Text("각 도구에서 끄기").font(.callout).foregroundStyle(.secondary)
+            }
+            VStack(spacing: 10) {
+                ForEach(system.machines) { machine in
+                    HStack(spacing: 12) {
+                        Image(systemName: machine.kind == .androidEmulator ? "iphone.gen3" : "shippingbox").foregroundStyle(.secondary).frame(width: 24)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(machine.title).font(.body).lineLimit(1)
+                            Text(machine.howToStop).font(.callout).foregroundStyle(.secondary).lineLimit(2)
+                        }
+                        Spacer(minLength: 12)
+                        Text(machine.footprint?.memoryText ?? "–").font(.body.monospacedDigit()).frame(width: 72, alignment: .trailing)
+                    }
+                }
+            }
+            Text("실행 중인 가상 머신과 에뮬레이터는 잡아 둔 메모리를 끌 때까지 돌려주지 않습니다. 안에서 도는 작업이 있을 수 있어 Macbak은 끄지 않고, 끄는 곳만 알려 줍니다.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     /// Developer tools whose terminal or parent tool is gone. Nothing starts ticked.
