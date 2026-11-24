@@ -51,6 +51,50 @@ enum CacheRules {
         return Verdict(tier: .model, why: "", devRow: nil)
     }
 
+    /// `tier`, with a person's rules: a rule turns a `model` verdict for exactly its folder into an offer. A keep, an
+    /// offer or a check already decided stays, a folder whose tool frees it itself (`reclaim`) is never ruled, and a
+    /// rule stops applying once the folder's names show someone's state (`stateNames`), as when sessions appear in it
+    /// after the approval.
+    static func tier(path: String, inside: String, beside: String, home: URL? = nil, userRules: Set<String>) -> Verdict {
+        let verdict = tier(path: path, inside: inside, beside: beside, home: home)
+        guard verdict.tier == .model, userRules.contains(path), reclaimTip(path) == nil,
+              (home.map { stateName(of: $0.appending(path: path), listing: inside) } ?? stateName(in: inside)) == nil else { return verdict }
+        return Verdict(tier: .offer, why: userRuleWhy, devRow: nil)
+    }
+
+    /// Names that mean a folder keeps someone's history, settings or work. Seen among its names, a "re-created" finding
+    /// proposes no rule and an approved rule stops applying, since a rule hands the whole folder to a tick: measured
+    /// 2026-11-24, the model proposed Xcode's coding assistant folder, which holds agent sessions, memories and backups
+    /// beside a re-downloadable binary.
+    /// - Note: Only ever withholds a choice, so a name too many errs on the safe side.
+    static let stateNames: Set<String> = [
+        "sessions", "session", "session storage", "memories", "memory", "history", "backups", "backup", "accounts", "profiles",
+        "preferences", "settings", "config", "cookies", "local storage", "indexeddb", "databases", "projects", "workspaces",
+        "conversations", "chats", "documents", "saves", "settings.json", "config.json", "mcp-servers.json",
+    ]
+
+    /// The first name in a rules listing (`a/ (b/, c), d`) that `stateNames` holds, any case, with or without its
+    /// extension or a leading dot (`sessions.jsonl`, `.config`).
+    static func stateName(in listing: String) -> String? {
+        listing.split(whereSeparator: { ",()".contains($0) })
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .map { $0.hasSuffix("/") ? String($0.dropLast()) : $0 }
+            .first { name in
+                let lower = name.lowercased()
+                let stem = (lower as NSString).deletingPathExtension
+                return stateNames.contains(lower) || stateNames.contains(stem.hasPrefix(".") ? String(stem.dropFirst()) : stem)
+            }
+    }
+
+    /// `stateName(in:)` over the rules listing and every name directly inside the folder: the listing stops after eight
+    /// names, so a `sessions/` sorted after many hash-named files would not show in it.
+    static func stateName(of folder: URL, listing: String) -> String? {
+        let children = (try? FileManager.default.contentsOfDirectory(atPath: folder.path(percentEncoded: false))) ?? []
+        return stateName(in: listing) ?? stateName(in: children.joined(separator: ", "))
+    }
+
+    static let userRuleWhy = "user rule"
+
     /// Why a `keep` or `model` verdict protects the item, in the words shown on its row.
     static func protectedReason(_ verdict: Verdict) -> String {
         if let row = verdict.devRow { return row.cost.isEmpty ? "개발 도구의 설정이나 데이터입니다." : row.cost + "." }
@@ -183,8 +227,8 @@ enum CacheRules {
     ]
 
     /// How to free the space of a large item the rules keep, the tool's own way. Shown on the row only: never run, and
-    /// never a reason to delete anything. A row it matches stays protected and is never shown to the on-device model,
-    /// since deleting its files by hand would break the tool.
+    /// never a reason to delete anything. A row it matches stays protected, is never shown to the on-device model and
+    /// never turned into a choice by a person's rule, since deleting its files by hand would break the tool.
     static let reclaim: [(Pattern, note: String, command: String?)] = [
         (Pattern(#"^Library/Containers/com\.docker\.docker/Data/vms(/|$)"#),
          "Docker의 이미지·컨테이너·볼륨이 모두 든 디스크입니다. 파일을 지우지 말고 Docker에서 쓰지 않는 것을 지우세요.", "docker system prune"),
@@ -219,6 +263,7 @@ enum CacheRules {
 
     /// The cost text a row shows, ending in a full stop, or nil when the table has none.
     static func costReason(_ verdict: Verdict) -> String? {
+        if verdict.why == userRuleWhy { return "기기 AI가 앱이 다시 만드는 것으로 보고, 직접 승인한 규칙입니다. 내용을 확인하고 고르세요." }
         guard let cost = verdict.devRow?.cost, !cost.isEmpty else { return nil }
         return cost + "."
     }

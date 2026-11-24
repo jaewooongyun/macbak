@@ -82,6 +82,31 @@ struct DiskScreen: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            askAll
+        }
+    }
+
+    /// The folders nothing could tell, largest first, handed to the on-device model in one click.
+    @ViewBuilder
+    private var askAll: some View {
+        let askable = cleanup.askable.count
+        if let progress = cleanup.advisor.progress {
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text("판단하지 못한 폴더를 기기 AI가 살펴보는 중 \(progress.done)/\(progress.total)")
+            }
+            .font(.callout)
+            .foregroundStyle(.secondary)
+        } else if askable > 0 {
+            Button("판단하지 못한 폴더를 기기 AI에게 묻기 (큰 것부터 \(min(askable, RuleAdvisor.batchLimit))개)") { cleanup.ask() }
+                .glassAction()
+            // The rows may sit in a folded group: why the last asking got no answer shows here too.
+            if let reason = cleanup.askable.lazy.compactMap({ row -> String? in
+                guard let input = row.askInput, case .unavailable(let reason)? = cleanup.advisor.answer(for: row.id, input: input) else { return nil }
+                return reason
+            }).first {
+                Text(reason).font(.callout).foregroundStyle(.secondary)
+            }
         }
     }
 

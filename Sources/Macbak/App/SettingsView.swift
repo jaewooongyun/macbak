@@ -7,6 +7,8 @@ struct SettingsView: View {
                 .tabItem { Label("일반", systemImage: "gearshape") }
             CleanupAgesView()
                 .tabItem { Label("정리 기준", systemImage: "clock.arrow.circlepath") }
+            UserRulesView()
+                .tabItem { Label("기기 AI 규칙", systemImage: "sparkles") }
         }
         .frame(width: 460)
         .fixedSize(horizontal: false, vertical: true)
@@ -126,6 +128,55 @@ struct CleanupAgesView: View {
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+/// The folders the person approved after the on-device model proposed them, each with a way to take it back.
+struct UserRulesView: View {
+    @Environment(CleanupCoordinator.self) private var cleanup
+    @State private var state = UserRuleStore.State.none
+    @State private var working = false
+    @State private var refused = false
+
+    var body: some View {
+        Form {
+            Section {
+                if state == .unreadable {
+                    Text("규칙 파일을 읽을 수 없어 규칙을 쓰지 않습니다. 파일은 그대로 둡니다.")
+                } else if state.paths.isEmpty {
+                    Text("승인한 규칙이 없습니다.").foregroundStyle(.secondary)
+                }
+                ForEach(state.paths.sorted(), id: \.self) { folder in
+                    HStack {
+                        Text("~/" + folder).lineLimit(1).truncationMode(.middle)
+                        Spacer()
+                        Button("철회") { revoke(folder) }
+                            .disabled(working)
+                    }
+                }
+            } header: {
+                Text("골라서 지울 것으로 바꾼 폴더")
+            } footer: {
+                Text(refused ? "정리하는 중에는 규칙을 바꾸지 않습니다. 끝난 뒤 다시 누르세요."
+                     : "디스크 화면에서 기기 AI가 앱이 다시 만드는 것으로 본 폴더를 승인하면 여기에 남습니다. 승인한 폴더는 미리 체크되지 않고 자동 정리에도 들지 않습니다. 철회하면 다시 지키는 쪽으로 돌아갑니다.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .formStyle(.grouped)
+        // Read again when a rule is approved or taken away anywhere, the disk window included.
+        .task(id: cleanup.rulesChanged) { state = cleanup.rules() }
+    }
+
+    private func revoke(_ folder: String) {
+        working = true
+        Task {
+            refused = !(await cleanup.revoke(folder))
+            state = cleanup.rules()
+            working = false
+        }
     }
 }
 

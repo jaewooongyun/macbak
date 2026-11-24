@@ -94,26 +94,38 @@ final class CleanupCoordinator {
     let explorer: CacheExplorer
     /// The disk summary: the dashboard asks it through `summarize`; the loop and the menu bar never.
     let narrator: DiskNarrator
+    /// Looks at a folder nothing could tell when a person asks (`ask`), and proposes a rule.
+    let advisor: RuleAdvisor
+    /// Where the person's rules live; nil for fixtures, which never write one.
+    @ObservationIgnored private let ruleStore: UserRuleStore?
+    /// Moves on each approval or revocation, so a screen listing the rules reads them again.
+    private(set) var rulesChanged = 0
     /// Whether a clean-up is deleting now. A scan waits for it to finish, so no new hold or verdict lands on rows a run
     /// was handed; together with the runner waiting for a scan in progress, scans and runs never overlap.
     @ObservationIgnored var isDeleting: @MainActor () -> Bool = { false }
     /// The clock the freshness checks read; tests move it.
     @ObservationIgnored var now: () -> Date = { .now }
 
-    init(settings: CleanupSettings? = nil, scanning: Scanning = Scanning(), narrator: DiskNarrator = DiskNarrator()) {
+    init(settings: CleanupSettings? = nil, scanning: Scanning = Scanning(), narrator: DiskNarrator = DiskNarrator(),
+         advisor: RuleAdvisor = RuleAdvisor(), rules: UserRuleStore? = UserRuleStore(home: FileManager.default.homeDirectoryForCurrentUser)) {
         scansDisk = true
         explorer = CacheExplorer()
         self.narrator = narrator
+        self.advisor = advisor
+        ruleStore = rules
         self.settings = settings
         sources = scanning
     }
 
-    init(fixture: [Area: [CleanupCandidate]], explorer: CacheExplorer = CacheExplorer(), narrator: DiskNarrator = DiskNarrator()) {
+    init(fixture: [Area: [CleanupCandidate]], explorer: CacheExplorer = CacheExplorer(), narrator: DiskNarrator = DiskNarrator(),
+         advisor: RuleAdvisor = RuleAdvisor()) {
         candidates = fixture
         scannedAt = .now
         scansDisk = false
         self.explorer = explorer
         self.narrator = narrator
+        self.advisor = advisor
+        ruleStore = nil
         settings = nil
         sources = Scanning()
     }
@@ -378,6 +390,46 @@ final class CleanupCoordinator {
         await narrator.narrate(brief)
     }
 
+    /// The rows the advisor may still be asked about: nothing could tell them, and they have no answer for the names
+    /// their folders show now, or the model could not run when they were asked.
+    var askable: [CleanupCandidate] {
+        all.filter { row in row.askInput.map { advisor.mayAsk(row.id, input: $0) } ?? false }
+    }
+
+    /// Asks the advisor about the rows nothing could tell outside the cache areas: those in `ids`, or the largest when
+    /// nil, at most a batch.
+    func ask(_ ids: Set<String>? = nil) {
+        let rows = all.filter { $0.askInput != nil && ids?.contains($0.id) != false }.sorted { $0.bytes > $1.bytes }
+        advisor.ask(rows.compactMap { row in row.askInput.map { (id: row.id, input: $0) } })
+    }
+
+    /// Makes the folder of a row a choice, when the advisor proposed it with the names the folder shows now, then scans
+    /// again. Refused while a clean-up deletes, and when the rules file cannot be written.
+    func approve(_ id: String) async -> Bool {
+        guard !isDeleting(), let ruleStore, let input = all.first(where: { $0.id == id })?.askInput,
+              case .proposal? = advisor.answer(for: id, input: input), ruleStore.approve(input.relative) else { return false }
+        rulesChanged += 1
+        await rescan()
+        return true
+    }
+
+    /// Takes a rule away, then scans again. Refused while a clean-up deletes.
+    func revoke(_ folder: String) async -> Bool {
+        guard !isDeleting(), let ruleStore, ruleStore.revoke(folder) else { return false }
+        rulesChanged += 1
+        await rescan()
+        return true
+    }
+
+    /// The person's rules as the file holds them now.
+    func rules() -> UserRuleStore.State { ruleStore?.load() ?? .none }
+
+    /// A scan that starts after the rules changed: one in progress read them before, so it is waited for, not joined.
+    private func rescan() async {
+        if let current { await current.value }
+        await scan()
+    }
+
     /// Waits for a scan in progress, so a run starts on settled verdicts.
     func settled() async {
         if let current { await current.value }
@@ -463,6 +515,6 @@ final class CleanupCoordinator {
         let installed = Set(names.filter { $0.contains(".") && NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0) != nil })
         let openFiles = await Task.detached(priority: .utility) { OpenFiles.capture() }.value
         return ScanContext(home: home, now: .now, openFiles: openFiles, runningBundleIDs: running, installedBundleIDs: installed, ages: ages,
-                           borrowerMemory: .live(), environment: WorkEnvironment.detect(home: home))
+                           borrowerMemory: .live(), environment: WorkEnvironment.detect(home: home), userRules: UserRuleStore(home: home).load().paths)
     }
 }

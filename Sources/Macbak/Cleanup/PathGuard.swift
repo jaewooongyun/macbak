@@ -35,10 +35,11 @@ enum CleanupRoots {
     static func all(home: URL) -> [URL] { fixed(home: home) + catalog(home: home) }
 
     /// Folders the cache rules accept right now: each is listed and classified again at deletion time, so a folder that
-    /// gained a protected child or the person's files since the scan stops being a root.
+    /// gained a protected child or the person's files since the scan stops being a root. The person's rules are read
+    /// again too, so a folder whose rule was taken away since the scan is refused.
     /// - Important: Only folders: a single file would need its parent as a root, which would open the whole parent.
     static func ruleRoots(home: URL) -> [URL] {
-        GeneralCacheScanner.classify(home: home)
+        GeneralCacheScanner.classify(home: home, userRules: UserRuleStore(home: home).load().paths)
             .filter { $0.rules.tier == .precheck || $0.rules.tier == .offer || $0.aiPending }
             .filter { !GeneralCacheScanner.commandOnly.contains($0.relative) }
             .filter { (try? $0.url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true }

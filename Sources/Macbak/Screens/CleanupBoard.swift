@@ -456,6 +456,71 @@ struct ConfirmCleanupSheet: View {
     }
 }
 
+/// Asking the on-device model about a folder nothing could tell, and approving the rule it proposes. Approving only
+/// makes the folder a choice: it is never ticked, and the run still checks it again.
+private struct RuleAsk: View {
+    let item: CleanupCandidate
+    let input: ExploreInput
+    @Environment(CleanupCoordinator.self) private var cleanup
+    @State private var approving = false
+    @State private var refused = false
+
+    var body: some View {
+        switch cleanup.advisor.answer(for: item.id, input: input) {
+        case nil:
+            Button("기기 AI에게 묻기") { cleanup.ask([item.id]) }
+                .glassAction()
+        case .asking?:
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text("기기 AI가 살펴보는 중…")
+            }
+            .font(.callout)
+            .foregroundStyle(.secondary)
+        case .proposal(let evidence)?:
+            // The model's own words, in English, as on the explorer's rows.
+            Text("기기 AI가 앱이 다시 만드는 것으로 봤습니다. 근거(원문): \(evidence)")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+            // What a rule would hand to a tick, so the person judges the names themselves.
+            Text("안에 든 것: \(input.inside)")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+            HStack(spacing: 8) {
+                Button("골라서 지울 것으로 바꾸기", action: approve)
+                    .glassAction()
+                    .disabled(approving)
+                if refused {
+                    Text("정리하는 중이거나 규칙 파일을 쓸 수 없어 바꾸지 못했습니다.").font(.callout).foregroundStyle(.secondary)
+                }
+            }
+        case .kept(let evidence)?:
+            Text("기기 AI가 사용자 데이터나 설정으로 봤습니다. 근거(원문): \(evidence)")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+        case .unsure(let reason)?:
+            Text(reason).font(.callout).foregroundStyle(.secondary)
+        case .unavailable(let reason)?:
+            HStack(spacing: 8) {
+                Text(reason).font(.callout).foregroundStyle(.secondary)
+                Button("다시 묻기") { cleanup.ask([item.id]) }
+                    .glassAction()
+            }
+        }
+    }
+
+    private func approve() {
+        approving = true
+        Task {
+            refused = !(await cleanup.approve(item.id))
+            approving = false
+        }
+    }
+}
+
 struct CandidateRow: View {
     let item: CleanupCandidate
     @Binding var isOn: Bool
@@ -491,6 +556,7 @@ struct CandidateRow: View {
                     Text("기기 AI의 근거(원문): \(seen)").font(.callout).foregroundStyle(.tertiary).lineLimit(2)
                 }
                 if let command = item.toolCommand { CommandChip(command: command) }
+                if let input = item.askInput { RuleAsk(item: item, input: input) }
             }
             Spacer(minLength: 16)
             Text((item.lowerBound ? "≥ " : "") + item.bytes.diskText).font(.body.monospacedDigit())

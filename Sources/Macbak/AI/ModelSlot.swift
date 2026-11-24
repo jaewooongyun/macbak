@@ -1,7 +1,7 @@
 import Foundation
 
-/// Runs on-device model work one job at a time for the whole app, so the explorer and the disk summary never load the
-/// model side by side.
+/// Runs on-device model work one job at a time for the whole app, so the explorer, the disk summary and a person's
+/// questions never load the model side by side.
 /// - Important: The turn is held while a job awaits, and handed straight to the next waiter when it ends: an actor
 ///   method alone would let another call in at every `await`.
 /// - Note: A deadline is when the job is cancelled, not when it has ended. Model calls stop cooperatively, so the turn
@@ -10,7 +10,7 @@ actor ModelSlot {
     enum Priority: Sendable {
         /// The explorer and its vetoes: rows wait on them before they can be ticked.
         case high
-        /// The disk summary.
+        /// The disk summary and a person's questions.
         case low
     }
 

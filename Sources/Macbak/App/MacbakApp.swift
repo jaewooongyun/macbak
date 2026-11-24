@@ -168,6 +168,7 @@ struct MacbakApp: App {
                 .environment(menuBar)
                 .environment(updater)
                 .environment(cleanupSettings)
+                .environment(cleanup)
         }
     }
 }

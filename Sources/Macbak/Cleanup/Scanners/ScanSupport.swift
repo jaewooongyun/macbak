@@ -18,6 +18,8 @@ struct ScanContext: Sendable {
     var deadline: ContinuousClock.Instant?
     /// What this Mac is used for, for what the screens show; no scanner judges by it.
     var environment = WorkEnvironment()
+    /// The folders a person approved as choices (`UserRuleStore`), as read when the scan started.
+    var userRules: Set<String> = []
 }
 
 enum ScanSupport {

@@ -77,6 +77,9 @@ struct CleanupCandidate: Identifiable, Sendable {
     var toolCommand: String?
     /// What the on-device model gets to look at, for rows the rules could not tell inside the cache areas.
     var exploreInput: ExploreInput?
+    /// What the on-device model may be asked about, for a folder nothing could tell outside the cache areas. Only a
+    /// person's click sends it (`RuleAdvisor`); a scan never does.
+    var askInput: ExploreInput?
     /// A source vouches that it comes back by itself: the fixed Xcode and log rules, the AI tool catalog, a
     /// developer-table cache the tool rebuilds locally, or an app's Caches folder (Apple's promise and the person's
     /// 3-day rule). Ready rows with it make the shallow clean-up: the menu bar's button and the scheduled loop.
@@ -101,6 +104,7 @@ struct CleanupCandidate: Identifiable, Sendable {
         row.aiEvidence = aiEvidence
         row.toolCommand = toolCommand
         row.exploreInput = exploreInput
+        row.askInput = askInput
         row.trusted = trusted
         row.manualOnly = manualOnly
         row.reproved = reproved
@@ -190,6 +194,14 @@ extension CleanupCandidate {
             row("node-modules", "node_modules", "~/dev/shop/node_modules", "folder", 0.6, keep("설치한 의존성. 직접 고친 내용과 오프라인 설치가 사라집니다.")),
             row("token", "token", "~/.cache/huggingface/token", "key", 0.000001, keep("키·토큰·암호를 뜻하는 이름이 있습니다.")),
             row("local-storage", "Local Storage", "~/Library/Application Support/Chat/Local Storage", "folder", 0.02, keep("앱 데이터베이스가 있습니다.")),
+            // A folder nothing could tell outside the cache areas: the disk summary offers to ask the on-device model.
+            {
+                var unknown = row("blob-store", "blob-store", "~/Library/Application Support/Editor/blob-store · 20일 전 사용", "folder", 1.3,
+                                  keep(CacheRules.unsureReason))
+                unknown.askInput = ExploreInput(url: URL(fileURLWithPath: "/nonexistent/sample/blob-store"),
+                                                relative: "Library/Application Support/Editor/blob-store", inside: "a1b2c3, d4e5f6", beside: "")
+                return unknown
+            }(),
             row("vm", "vm_bundles", "~/Library/Application Support/AppX/vm_bundles", "shippingbox", 11.3, keep("디스크 이미지나 가상 머신이 있습니다.")),
             row("vpn", "Zscaler", "~/Library/Logs/Zscaler", "lock.shield", 0.01, keep("보안·관리 소프트웨어입니다.")),
             row("unknown", ".npmrc", "~/.npmrc", "doc", 0.000001, keep("무엇인지 판단할 근거가 부족해 지우지 않습니다.")),

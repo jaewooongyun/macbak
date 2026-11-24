@@ -3,8 +3,9 @@ import Foundation
 /// Everything the other scanners do not cover, sorted by the cache rules: developer tool folders (Gradle, Android, npm,
 /// pip, uv, CocoaPods, ...), caches inside Application Support (Chromium, Electron), sandbox container caches and a
 /// few Xcode and simulator folders. One row per folder; its contents are offered and the folder itself stays.
-/// - Important: The rules decide alone here. Their "don't know" is protected until the on-device model has looked, and
-///   only items inside ``CacheRules/modelAreas`` are ever shown to the model (`aiPending`).
+/// - Important: The rules decide alone here. Their "don't know" is protected until the on-device model has looked. Only
+///   items inside ``CacheRules/modelAreas`` are shown to the model by themselves (`aiPending`); a folder outside them
+///   only when a person asks (`askInput`), and then the model may only propose a rule the person approves.
 /// - Note: Rows that the tool says to clean only with its own command (`uv cache prune`) get no targets: the command is
 ///   shown instead.
 enum GeneralCacheScanner {
@@ -56,9 +57,9 @@ enum GeneralCacheScanner {
 
     /// Lists and classifies every candidate (names only), dropping a folder whose own descendant is also listed so the
     /// finer rows win, as with Gradle's build cache beside its dependency cache.
-    static func classify(_ context: ScanContext) -> [Found] { classify(home: context.home) }
+    static func classify(_ context: ScanContext) -> [Found] { classify(home: context.home, userRules: context.userRules) }
 
-    static func classify(home: URL) -> [Found] {
+    static func classify(home: URL, userRules: Set<String> = []) -> [Found] {
         let claimed = aiClaimed(home: home)
         var relatives = Set<String>()
         for pattern in patterns {
@@ -78,7 +79,7 @@ enum GeneralCacheScanner {
             // looked at; the deletion root would then be the link's target. Skipped, like a linked clean-up root.
             guard let homeReal, noLink(from: homeReal, through: relative) else { continue }
             let listing = CacheRules.listing(home: home, relative: relative)
-            let rules = CacheRules.tier(path: relative, inside: listing.inside, beside: listing.beside, home: home)
+            let rules = CacheRules.tier(path: relative, inside: listing.inside, beside: listing.beside, home: home, userRules: userRules)
             let pending = rules.tier == .model && CacheRules.modelMayOffer(path: relative, inside: listing.inside)
             found.append(Found(relative: relative, url: url, inside: listing.inside, beside: listing.beside, rules: rules, aiPending: pending))
         }
@@ -135,6 +136,11 @@ enum GeneralCacheScanner {
         row.manualOnly = isHandPicked(item.relative)
         if item.aiPending, alarm == nil {
             row.exploreInput = ExploreInput(url: item.url, relative: item.relative, inside: item.inside, beside: item.beside)
+        }
+        // Outside the cache areas the model looks only when a person asks, and only at a folder a rule could name whose
+        // names could be read: an empty or unreadable one gives the model nothing to look at.
+        if tier == .model, !item.aiPending, alarm == nil, tip == nil, isFolder, !item.inside.hasPrefix("(") {
+            row.askInput = ExploreInput(url: item.url, relative: item.relative, inside: item.inside, beside: item.beside)
         }
         return row
     }
