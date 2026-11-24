@@ -83,6 +83,7 @@ struct LoopScreen: View {
             }
             .readableColumn()
         }
+        .softScrollEdges()
     }
 
     private var nextRunText: String {

@@ -24,7 +24,7 @@ struct GlanceScreen: View {
             }
             .readableColumn()
         }
-        .modifier(SoftScrollEdges())
+        .softScrollEdges()
     }
 
     private func memoryTile(_ memory: MemoryUsage) -> some View {
@@ -155,17 +155,6 @@ struct GlanceScreen: View {
                 OpenHint()
             }
             AppUsageList(apps: Array(system.apps.prefix(4)))
-        }
-    }
-}
-
-/// On macOS 26 and later, cards scrolling under the toolbar or past the bottom fade softly instead of being cut.
-private struct SoftScrollEdges: ViewModifier {
-    func body(content: Content) -> some View {
-        if #available(macOS 26, *) {
-            content.scrollEdgeEffectStyle(.soft, for: [.top, .bottom])
-        } else {
-            content
         }
     }
 }

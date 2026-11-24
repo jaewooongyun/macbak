@@ -25,6 +25,8 @@ struct GeneralSettingsView: View {
                 Toggle("메뉴 막대에 Macbak 보기", isOn: $settings.isShown)
             } footer: {
                 Text("숨겨도 앱은 계속 실행됩니다. Dock 아이콘을 누르면 창이 다시 열립니다.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
                     .multilineTextAlignment(.leading)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -43,6 +45,8 @@ struct GeneralSettingsView: View {
                 Text("보이는 항목")
             } footer: {
                 Text("모두 끄면 Macbak 아이콘만 보입니다.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
                     .multilineTextAlignment(.leading)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -55,6 +59,8 @@ struct GeneralSettingsView: View {
                 Text("표시 방식")
             } footer: {
                 Text("맥박은 늘 가장 바쁜 자원의 부하를 링으로 보여 줍니다. 메모리 그래프는 최근 1분을 그리며 2초마다 한 칸씩 움직이고, 디스크 그래프는 사용량 막대입니다. 둘 다 끄면 항목 아이콘만 보입니다.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
                     .multilineTextAlignment(.leading)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -79,6 +85,8 @@ struct GeneralSettingsView: View {
                 Text(updater.disabledReason ?? (updater.automaticallyChecks
                     ? "하루에 한 번 새 버전을 확인하고, 있으면 설치할지 묻습니다. 업데이트를 확인하고 내려받을 때만 GitHub의 배포 위치에 접속합니다."
                     : "자동 확인이 꺼져 있어 '지금 확인'을 누를 때만 새 버전을 확인합니다. 업데이트를 확인하고 내려받을 때만 GitHub의 배포 위치에 접속합니다."))
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
                     .multilineTextAlignment(.leading)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -106,6 +114,8 @@ struct CleanupAgesView: View {
                 Text("이만큼 쓰지 않은 것만 정리합니다")
             } footer: {
                 Text("짧게 고르면 정기 정리와 즉시 정리가 자동으로 지우는 범위도 넓어집니다. 열려 있는 파일과 실행 중인 앱은 기간과 상관없이 지키며, 값을 바꾸면 지금까지의 검사 결과는 다시 검사해야 합니다.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
                     .multilineTextAlignment(.leading)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -123,6 +133,7 @@ struct CleanupAgesView: View {
 struct MenuBarPreview: View {
     @Environment(SystemMonitor.self) private var system
     @Environment(MenuBarSettings.self) private var settings
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         let image = MenuBarGlyph.image(for: settings.content, system: system)
@@ -144,7 +155,7 @@ struct MenuBarPreview: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .animation(.smooth, value: settings.content)
+        .animation(reduceMotion ? nil : Theme.stateChange, value: settings.content)
     }
 
     private func strip(_ image: NSImage, scheme: ColorScheme) -> some View {

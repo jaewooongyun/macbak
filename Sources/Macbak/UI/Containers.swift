@@ -289,6 +289,11 @@ extension View {
 }
 
 extension View {
+    /// On macOS 26 and later, cards scrolling under the toolbar or past the bottom fade softly instead of being cut.
+    func softScrollEdges() -> some View {
+        modifier(SoftScrollEdges())
+    }
+
     /// A control bar floating over the bottom of scrolling content. On macOS 26 and later, `safeAreaBar` also fades and
     /// blurs the content passing underneath, so text on the glass stays legible over busy rows.
     @ViewBuilder
@@ -420,4 +425,15 @@ extension EnvironmentValues {
 
 extension View {
     func riseIn(_ order: Int) -> some View { modifier(RiseIn(order: order)) }
+}
+
+/// On macOS 26 and later, cards scrolling under the toolbar or past the bottom fade softly instead of being cut.
+private struct SoftScrollEdges: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 26, *) {
+            content.scrollEdgeEffectStyle(.soft, for: [.top, .bottom])
+        } else {
+            content
+        }
+    }
 }

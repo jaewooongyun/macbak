@@ -24,6 +24,7 @@ struct AIActivityScreen: View {
             }
             .readableColumn()
         }
+        .softScrollEdges()
     }
 
     /// A tool is worth a row when it runs, or has left logs or jobs behind.
