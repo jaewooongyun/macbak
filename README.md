@@ -2,26 +2,35 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/glance-dark.png">
-  <img src="docs/screenshots/glance-light.png" alt="한눈에 화면. 맥박, 메모리, 디스크, AI 사용량, 정리할 수 있는 공간, 정기 정리 타일" width="880">
+  <img src="docs/screenshots/glance-light.png" alt="한눈에 화면. BPM으로 뛰는 심장과 CPU·GPU·메모리 압력 활동 링, 메모리·디스크·AI·정리·정기 정리 타일" width="880">
 </picture>
 
 내 Mac의 상태를 한눈에 보는 macOS 앱입니다. 디스크와 메모리, AI 도구 사용량을 실시간으로 보여 주고 쌓인 캐시는 이 Mac을 직접 검사해 지워도 되는 것만 골라 정리합니다. 이름은 한국어 "맥박"을 영문으로 적은 것입니다.
 
 ## 할 수 있는 일
 
-- 맥박은 CPU, GPU, 메모리 압력 가운데 가장 바쁜 자원을 박동수로 바꾼 값입니다. 모두 쉬면 60, 하나라도 꽉 차면 120입니다.
+- 맥박은 CPU, GPU, 메모리 압력 가운데 가장 바쁜 자원을 박동수로 바꾼 값입니다. 모두 쉬면 60, 하나라도 꽉 차면 120입니다. 세 자원은 활동 링으로 보여 주고, 링마다 최근 1분 최고치를 짧은 눈금으로 남깁니다. 심장은 실제 BPM 박자로 뜁니다.
 - 디스크 정리는 Xcode 캐시, 앱 캐시와 로그, 기기 지원 파일, 시뮬레이터, AI 도구 캐시를 검사해 "지워도 되는 것", "골라서 지울 것", "지우면 안 되는 것"으로 나눕니다.
 - 디스크 화면을 열면 홈 폴더의 프로젝트까지 검사해(3~4분) 표준 위치 밖 Xcode 빌드 캐시, git이 무시하는 빌드 산출물, 오래 안 쓴 `node_modules`, 끝난 AI 작업의 임시 파일, 시뮬레이터 런타임도 찾습니다. 표준 위치 밖 Xcode 빌드 캐시는 바로 지워도 되는 것만 미리 체크하고 나머지는 직접 골라야 지웁니다.
 - 메모리 정리는 아무도 쓰지 않는데 켜진 채 남은 시뮬레이터를 끕니다. 쓰지 않는 앱, 주인 없이 남은 개발 도구, 오래 쉬는 AI 세션은 직접 골라 끝냅니다. 앱 메모리에는 앱이 띄운 보조 프로세스도 더합니다. 지금 쓰는 앱은 건드리지 않습니다.
 - 설정의 "정리 기준"에서 항목마다 얼마나 오래 쓰지 않아야 정리할지 고릅니다.
 - AI 활동 화면은 Claude Code, Codex, Gemini CLI 같은 도구의 세션과 CPU, 메모리, 저장 공간을 제조사별로 보여 줍니다.
-- 메뉴 막대 패널에서 상태를 바로 보고 다시 생기는 캐시는 버튼 하나로 지웁니다.
+- 메뉴 막대 아이콘은 부하를 채운 링과 BPM을 보여 줍니다. 패널에서는 세 겹 링과 숫자로 상태를 바로 보고, 다시 생기는 캐시는 버튼 하나로 지웁니다.
 - 정기 정리를 켜 두면 정해진 시각마다 검사하고 다시 생기는 캐시만 지웁니다.
 - 새 버전이 나오면 하루 안에 알려 주고 설치할지 묻습니다. 설정에서 자동 설치를 켤 수 있습니다.
 
 정리는 휴지통을 거치지 않고 바로 지우므로 되돌릴 수 없습니다. 그래서 지울 목록을 먼저 보여 주고 지우기 직전에 줄마다 다시 확인합니다. 쓰는 중이거나 확인할 수 없는 것은 지우지 않습니다.
 
 ## 화면
+
+맥박 링은 값만큼 차고, 값이 클수록 빛 띠가 빨리 흐르며, 끝점이 BPM 박자로 맥동합니다. 움직임은 창이 보일 때만 돌고 "동작 줄이기"를 켜면 멈춥니다.
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/pulse-dark.gif">
+    <img src="docs/screenshots/pulse-light.gif" alt="한눈에 화면의 맥박 카드. 세 활동 링에 빛 띠가 흐르고 심장과 링 끝점이 BPM 박자로 뛴다" width="720">
+  </picture>
+</p>
 
 디스크 화면(왼쪽)은 정리 후보를 세 묶음으로 보여 주고 메뉴 막대 패널(오른쪽)은 한눈에 화면을 줄여 담습니다. 디스크 화면의 정리 목록은 예시 데이터입니다.
 
@@ -32,7 +41,7 @@
   </picture>
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/menubar-dark.png">
-    <img src="docs/screenshots/menubar-light.png" alt="메뉴 막대 패널. 맥박, 메모리, 디스크, AI 사용량, 정리" width="270">
+    <img src="docs/screenshots/menubar-light.png" alt="메뉴 막대 패널. 세 겹 활동 링과 CPU·GPU·메모리 숫자, 메모리, 디스크, AI 사용량, 정리" width="270">
   </picture>
 </p>
 
