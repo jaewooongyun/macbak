@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// The glance pulse card's activity rings and beating heart, in Core Animation.
+/// The activity rings and beating heart of the glance pulse card and the menu bar panel, in Core Animation.
 /// - Important: The app sets each new value once per 2-second sample; the render server plays every endless motion (the
 ///   flow, the cap's pulse, the heart). A SwiftUI animation here would be a main-thread commit on every frame, the cost
 ///   `Theme.liveChange` documents. The motions stop while the window is covered, minimized or closed, and with Reduce
@@ -31,8 +31,12 @@ private var endlessFrameRate: CAFrameRateRange { CAFrameRateRange(minimum: 10, m
 /// Unflipped layer coordinates turn counterclockwise for positive angles, so clockwise is negative.
 private func ringAngle(_ value: Double) -> Double { -2 * .pi * value }
 
-/// Whether a window shows any part of itself; nil (no window) counts as hidden.
-@MainActor private func onScreen(_ window: NSWindow?) -> Bool { window?.occlusionState.contains(.visible) ?? false }
+/// Whether a window shows any part of itself; nil (no window) counts as hidden. An ordered-out window (the closed menu bar
+/// panel) counts as hidden even before its occlusion state catches up.
+@MainActor private func onScreen(_ window: NSWindow?) -> Bool {
+    guard let window else { return false }
+    return window.isVisible && window.occlusionState.contains(.visible)
+}
 
 // MARK: - Activity ring
 
@@ -44,12 +48,15 @@ struct ActivityRing: NSViewRepresentable {
     let tint: Color
     let bpm: Int?
     var lineWidth: CGFloat = 12
+    /// How far the peak tick reaches past each edge of the ring; rings nested close together use less so neighbours keep apart.
+    var tickOverhang: CGFloat = 2
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     func makeNSView(context: Context) -> ActivityRingView { ActivityRingView() }
 
     func updateNSView(_ view: ActivityRingView, context: Context) {
-        view.set(value: value, peak: peak, tint: NSColor(tint), bpm: bpm, lineWidth: lineWidth, reduceMotion: reduceMotion)
+        view.set(value: value, peak: peak, tint: NSColor(tint), bpm: bpm, lineWidth: lineWidth, tickOverhang: tickOverhang,
+                 reduceMotion: reduceMotion)
     }
 }
 
@@ -70,11 +77,15 @@ final class ActivityRingView: LiveShapeView {
     private var tint = NSColor.systemPink
     private var bpm: Int?
     private var lineWidth: CGFloat = 12
+    private var tickOverhang: CGFloat = 2
     private var reduceMotion = false
     /// The angles last given to the cap and the peak tick: each turn animates from here.
     private var capAngle = 0.0
     private var peakAngle = 0.0
     private var occlusion: NSObjectProtocol?
+    /// Whether the motions may run in this window. Tests swap it to drive the shown and hidden paths through the real
+    /// occlusion observer, which a test process cannot do with a real window.
+    var visibility: @MainActor (NSWindow?) -> Bool = onScreen
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -99,15 +110,16 @@ final class ActivityRingView: LiveShapeView {
 
     required init?(coder: NSCoder) { nil }
 
-    func set(value: Double?, peak: Double?, tint: NSColor, bpm: Int?, lineWidth: CGFloat, reduceMotion: Bool) {
+    func set(value: Double?, peak: Double?, tint: NSColor, bpm: Int?, lineWidth: CGFloat, tickOverhang: CGFloat = 2, reduceMotion: Bool) {
         let old = self.value
         self.value = value.map { min(max($0, 0), 1) }
         self.peak = peak.map { min(max($0, 0), 1) }
         self.tint = tint
         self.bpm = bpm
         self.reduceMotion = reduceMotion
-        if lineWidth != self.lineWidth {
+        if lineWidth != self.lineWidth || tickOverhang != self.tickOverhang {
             self.lineWidth = lineWidth
+            self.tickOverhang = tickOverhang
             needsLayout = true
         }
         paint()
@@ -168,11 +180,11 @@ final class ActivityRingView: LiveShapeView {
         let center = CGPoint(x: bounds.midX, y: bounds.midY)
         let radius = side / 2
         let path = CGMutablePath()
-        // Unflipped view: angles grow counterclockwise, so start at the top and go clockwise (as `RingView`).
+        // Unflipped view: angles grow counterclockwise, so start at the top and go clockwise.
         path.addArc(center: center, radius: radius, startAngle: .pi / 2, endAngle: .pi / 2 - 2 * .pi, clockwise: true)
         let tick = CGMutablePath()
-        tick.move(to: CGPoint(x: center.x, y: center.y + radius - lineWidth / 2 - 2))
-        tick.addLine(to: CGPoint(x: center.x, y: center.y + radius + lineWidth / 2 + 2))
+        tick.move(to: CGPoint(x: center.x, y: center.y + radius - (lineWidth / 2 + tickOverhang)))
+        tick.addLine(to: CGPoint(x: center.x, y: center.y + radius + lineWidth / 2 + tickOverhang))
         let capSide = lineWidth * 0.9
         still {
             for shape in [track, fillMask, flowMask] {
@@ -214,7 +226,7 @@ final class ActivityRingView: LiveShapeView {
     /// Runs the flow and the cap's pulse only while they can be seen. Removing them explicitly matters: turning off a
     /// SwiftUI transaction does not stop a Core Animation repeat.
     private func updateMotion() {
-        let moving = onScreen(window) && !reduceMotion && value != nil
+        let moving = visibility(window) && !reduceMotion && value != nil
         // Held still, the light band would sit on the ring as a fixed bright patch, so it shows only while it flows
         // (below 1% its speed is 0).
         still { flowHost.isHidden = !moving || (value ?? 0) < 0.01 }
@@ -267,6 +279,8 @@ final class BeatingHeartView: LiveShapeView {
     private var bpm: Int?
     private var reduceMotion = false
     private var occlusion: NSObjectProtocol?
+    /// Whether the beat may run in this window; see `ActivityRingView.visibility`.
+    var visibility: @MainActor (NSWindow?) -> Bool = onScreen
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -320,12 +334,12 @@ final class BeatingHeartView: LiveShapeView {
     }
 
     private func updateMotion() {
-        guard onScreen(window), !reduceMotion, let bpm else {
+        guard visibility(window), !reduceMotion, let bpm else {
             mark.removeAnimation(forKey: "beat")
             return
         }
         if mark.animation(forKey: "beat") == nil {
-            // `Beat`'s shape (Pulse.swift), held still for the rest of each beat.
+            // A quick swell and a small rebound, held still for the rest of each beat.
             let beat = CAKeyframeAnimation(keyPath: "transform.scale")
             beat.values = [1, 1.28, 0.94, 1, 1]
             beat.keyTimes = [0, 0.13, 0.29, 0.45, 1]

@@ -47,3 +47,105 @@ import Testing
     bar.set([part("c"), part("b")], animated: false)
     #expect(bar.layer?.sublayers?.allSatisfy { $0.frame.width > 0 } == true)
 }
+
+// MARK: - Peak window and the panel's nested rings
+
+@Test func thePeakForgetsEverythingAfterAGapLongerThanTenSeconds() {
+    let start = Date(timeIntervalSinceReferenceDate: 0)
+    let spike = VitalSample(id: 0, cpu: 0.9, gpu: nil, memory: nil)
+    let newest = VitalSample(id: 1, cpu: 0.2, gpu: nil, memory: nil)
+    var window = PeakWindow()
+    #expect(window.peak(of: .cpu, in: [], at: start) == nil)
+    #expect(window.peak(of: .cpu, in: [spike], at: start) == 0.9)  // the newest counts before it is stamped
+    window.stamp(spike.id, at: start)
+    #expect(window.peak(of: .cpu, in: [spike, newest], at: start.addingTimeInterval(10)) == 0.9)
+    // A sleep or a stall: the old spike's age no longer says how recent it is, so only the newest counts.
+    #expect(window.peak(of: .cpu, in: [spike, newest], at: start.addingTimeInterval(10.1)) == 0.2)
+}
+
+@Test func thePeakCountsTheLastMinuteOnly() {
+    let start = Date(timeIntervalSinceReferenceDate: 0)
+    var vitals = [VitalSample(id: 0, cpu: 0.9, gpu: nil, memory: nil)]
+    var window = PeakWindow()
+    window.stamp(0, at: start)
+    for id in 1...30 {  // a sample every 2 s, so no gap clears the window
+        vitals.append(VitalSample(id: id, cpu: 0.2, gpu: nil, memory: nil))
+        window.stamp(id, at: start.addingTimeInterval(Double(id) * 2))
+    }
+    #expect(window.peak(of: .cpu, in: vitals, at: start.addingTimeInterval(60)) == 0.9)
+    #expect(window.peak(of: .cpu, in: vitals, at: start.addingTimeInterval(60.1)) == 0.2)
+    #expect(window.peak(of: .gpu, in: vitals, at: start.addingTimeInterval(60)) == nil)
+}
+
+@Test func nestedRingsLeaveRoomBetweenTheirPeakTicks() {
+    // A 6pt line and a 5pt gap: the rings' 1pt ticks stay 3pt apart, and the inner hole holds the 12pt heart.
+    #expect(ConcentricVitalRings.diameters(for: 76) == [76, 54, 32])
+}
+
+/// The endless motions running in a layer tree (the ring's flow and cap pulse, the heart's beat), by key. A value's
+/// short turn into place is not one.
+@MainActor private func endlessMotions(_ layer: CALayer?) -> [String] {
+    guard let layer else { return [] }
+    let own = (layer.animationKeys() ?? []).filter { layer.animation(forKey: $0)?.repeatCount == .infinity }
+    return own + (layer.sublayers ?? []).flatMap { endlessMotions($0) }
+}
+
+@MainActor private final class Shown {
+    var value = false
+}
+
+/// A window that is never put on screen, like the menu bar panel at launch.
+@MainActor private func hiddenWindow() -> NSWindow {
+    NSWindow(contentRect: NSRect(x: 0, y: 0, width: 100, height: 100), styleMask: [.borderless], backing: .buffered, defer: true)
+}
+
+@MainActor @Test func ringMotionsRunOnlyWhileTheirWindowShows() {
+    let window = hiddenWindow()
+    let ring = ActivityRingView(frame: NSRect(x: 0, y: 0, width: 76, height: 76))
+    window.contentView?.addSubview(ring)
+    ring.set(value: 0.5, peak: 0.7, tint: .systemPink, bpm: 80, lineWidth: 6, reduceMotion: false)
+    #expect(endlessMotions(ring.layer).isEmpty)
+
+    // The real occlusion observer reruns the check; the test only decides what the check answers.
+    let shown = Shown()
+    ring.visibility = { _ in shown.value }
+    let occlusionChanged = { NotificationCenter.default.post(name: NSWindow.didChangeOcclusionStateNotification, object: window) }
+    shown.value = true
+    occlusionChanged()
+    #expect(Set(endlessMotions(ring.layer)) == ["flow", "beat"])
+    shown.value = false
+    occlusionChanged()
+    #expect(endlessMotions(ring.layer).isEmpty)
+    ring.set(value: 0.8, peak: 0.8, tint: .systemPink, bpm: 90, lineWidth: 6, reduceMotion: false)  // a sample while hidden
+    #expect(endlessMotions(ring.layer).isEmpty)
+    shown.value = true
+    occlusionChanged()
+    #expect(Set(endlessMotions(ring.layer)) == ["flow", "beat"])
+    ring.set(value: 0.8, peak: 0.8, tint: .systemPink, bpm: 90, lineWidth: 6, reduceMotion: true)
+    #expect(endlessMotions(ring.layer).isEmpty)
+}
+
+@MainActor @Test func theHeartBeatsOnlyWhileItsWindowShows() {
+    let window = hiddenWindow()
+    let heart = BeatingHeartView(frame: NSRect(x: 0, y: 0, width: 12, height: 12))
+    window.contentView?.addSubview(heart)
+    heart.set(bpm: 80, reduceMotion: false)
+    #expect(endlessMotions(heart.layer).isEmpty)
+
+    let shown = Shown()
+    heart.visibility = { _ in shown.value }
+    let occlusionChanged = { NotificationCenter.default.post(name: NSWindow.didChangeOcclusionStateNotification, object: window) }
+    shown.value = true
+    occlusionChanged()
+    #expect(endlessMotions(heart.layer) == ["beat"])
+    shown.value = false
+    occlusionChanged()
+    #expect(endlessMotions(heart.layer).isEmpty)
+    heart.set(bpm: 100, reduceMotion: false)  // a sample while hidden
+    #expect(endlessMotions(heart.layer).isEmpty)
+    shown.value = true
+    occlusionChanged()
+    #expect(endlessMotions(heart.layer) == ["beat"])
+    heart.set(bpm: 100, reduceMotion: true)
+    #expect(endlessMotions(heart.layer).isEmpty)
+}

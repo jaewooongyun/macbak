@@ -52,25 +52,6 @@ struct Freshness: View {
     }
 }
 
-// MARK: - Gauges
-
-struct RingCenter: View {
-    let value: String
-    let caption: String
-
-    var body: some View {
-        VStack(spacing: 1) {
-            Text(value)
-                .font(Theme.numeral(20))
-                .monospacedDigit()
-            Text(caption).font(.callout).foregroundStyle(.secondary)
-        }
-        .lineLimit(1)
-        .minimumScaleFactor(0.7)
-        .padding(.horizontal, 14)
-    }
-}
-
 /// Diagonal texture for "projected" values, so they never rely on color alone.
 struct Stripes: View {
     var body: some View {

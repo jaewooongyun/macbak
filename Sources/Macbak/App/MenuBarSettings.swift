@@ -5,7 +5,8 @@ import SwiftUI
 /// What the menu bar item shows. Every combination is valid:
 /// no metric selected shows the app symbol, and neither value nor graph shows each metric's symbol alone.
 struct MenuBarContent: Equatable {
-    /// The pulse (BPM, or a tiny heart monitor with the graph on). Off by default so earlier settings stay as they were.
+    /// The pulse as a ring filled by the averaged load of the busiest resource, with the BPM beside it when values are on.
+    /// Off by default so earlier settings stay as they were.
     var pulse = false
     var memory = true
     var disk = false
@@ -66,7 +67,7 @@ enum MenuBarGlyph {
 
     static func image(for content: MenuBarContent, system: SystemMonitor) -> NSImage {
         let pulse = system.vitals.isEmpty ? nil : PulseReading(loads: system.vitals.map(\.load))
-        let renderer = ImageRenderer(content: GlyphView(content: content, pulse: pulse, loads: system.vitals.suffix(graphBeats).map(\.load),
+        let renderer = ImageRenderer(content: GlyphView(content: content, pulse: pulse,
                                                         memory: system.memory, disk: system.disk, history: system.history))
         // The item shows on every display's menu bar, so render for the sharpest one.
         renderer.scale = NSScreen.screens.map(\.backingScaleFactor).max() ?? 2
@@ -74,9 +75,6 @@ enum MenuBarGlyph {
         image.isTemplate = true
         return image
     }
-
-    /// Beats in the menu bar heart monitor: the last 10 seconds. More than five read as a comb at menu bar size.
-    nonisolated static let graphBeats = 5
 
     static func accessibilityText(for content: MenuBarContent, system: SystemMonitor) -> String {
         let memory = system.memory, disk = system.disk
@@ -98,7 +96,6 @@ enum MenuBarGlyph {
     private struct GlyphView: View {
         let content: MenuBarContent
         let pulse: PulseReading?
-        let loads: [Double]
         let memory: MemoryUsage?
         let disk: DiskUsage?
         let history: [MemorySample]
@@ -122,15 +119,11 @@ enum MenuBarGlyph {
         }
 
         private var pulseSegment: some View {
+            // The ring is the item's icon, so it shows whatever the value and graph settings are.
             HStack(spacing: 3) {
-                Image(systemName: "heart.fill")
-                if content.graph {
-                    BeatLine(loads: loads)
-                        .stroke(Color.black, style: StrokeStyle(lineWidth: 1.2, lineCap: .round, lineJoin: .round))
-                        .frame(width: 36, height: 13)
-                }
+                LoadRing(load: pulse?.load)
                 if content.value {
-                    // Left-aligned: the heart stays next to the number; the room for a third digit trails.
+                    // Left-aligned: the ring stays next to the number; the room for a third digit trails.
                     reserved("000", pulse.map { "\($0.bpm)" } ?? "–", alignment: .leading)
                 }
             }
@@ -223,12 +216,22 @@ enum MenuBarGlyph {
         }
     }
 
-    /// The heart-monitor line as a shape, so it renders into the template image.
-    private struct BeatLine: Shape {
-        let loads: [Double]
+    /// The pulse's load as a ring that fills clockwise from the top, over a faint track; the track alone before any sample.
+    /// Both strokes are inset by half the line, so the ring stays inside the 16pt item.
+    private struct LoadRing: View {
+        let load: Double?
+        private let line: CGFloat = 2.6
 
-        func path(in rect: CGRect) -> Path {
-            PulseLine.path(loads: loads, beats: MenuBarGlyph.graphBeats, in: rect.size, baseline: rect.height * 0.75)
+        var body: some View {
+            ZStack {
+                Circle().inset(by: line / 2).stroke(Color.black.opacity(0.3), lineWidth: line)
+                if let load {
+                    Circle().inset(by: line / 2).trim(from: 0, to: min(max(load, 0), 1))
+                        .stroke(Color.black, style: StrokeStyle(lineWidth: line, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
+                }
+            }
+            .frame(width: 14, height: 14)
         }
     }
 

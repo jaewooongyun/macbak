@@ -176,9 +176,8 @@ struct PulseHero: View {
     @Environment(SystemMonitor.self) private var system
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var width: CGFloat = 0
-    /// When this card saw each sample, by sample id. Samples carry no time, so the card stamps them as they arrive; only
-    /// samples it saw in the last minute count toward a ring's peak.
-    @State private var seen: [Int: Date] = [:]
+    /// Each ring's peak over the last minute, from the samples this card saw arrive.
+    @State private var peaks = PeakWindow()
 
     var body: some View {
         let reading = system.vitals.isEmpty ? nil : PulseReading(loads: system.vitals.map(\.load))
@@ -225,13 +224,8 @@ struct PulseHero: View {
     private func ring(_ vital: VitalSample.Vital, sample: VitalSample?, bpm: Int?) -> some View {
         let value = sample?.value(of: vital)
         let pressure = system.memory?.pressure
-        let tint: Color = switch vital {
-        case .cpu: .pink
-        case .gpu: .indigo
-        case .memory: pressure?.tint ?? .green
-        }
         return VStack(spacing: 8) {
-            ActivityRing(value: value, peak: peak(of: vital), tint: tint, bpm: bpm)
+            ActivityRing(value: value, peak: peaks.peak(of: vital, in: system.vitals), tint: vital.ringTint(pressure: pressure), bpm: bpm)
                 .frame(width: 96, height: 96)
             HStack(spacing: 4) {
                 Text(vital.title).font(.callout.weight(.medium)).foregroundStyle(.secondary)
@@ -251,41 +245,12 @@ struct PulseHero: View {
         .frame(maxWidth: .infinity)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(vital.title)
-        .accessibilityValue(sample == nil ? "재는 중" : spokenValue(vital, value: value, pressure: pressure, leads: sample?.leader == vital))
-        .help(vital == .memory ? "메모리 압력: 100 − macOS가 사용 가능하다고 보는 메모리 비율. 압력이 보통이면 맥박에는 절반만 반영합니다." : "")
+        .accessibilityValue(sample == nil ? "재는 중" : vital.spokenValue(value, pressure: pressure, leads: sample?.leader == vital))
+        .help((vital == .memory ? "메모리 압력: 100 − macOS가 사용 가능하다고 보는 메모리 비율. 압력이 보통이면 맥박에는 절반만 반영합니다. " : "")
+              + "링을 가로지르는 짧은 눈금은 최근 1분 동안의 최고치입니다.")
     }
 
-    /// What VoiceOver reads after the ring's name: the value, the memory pressure level, and whether this resource sets
-    /// the pulse — everything the ring shows beside its number.
-    private func spokenValue(_ vital: VitalSample.Vital, value: Double?, pressure: MemoryPressure?, leads: Bool) -> String {
-        guard let value else { return "읽을 수 없음" }
-        var parts = [(value * 100).percentText]
-        if vital == .memory, let pressure { parts.append("압력 \(pressure.shortTitle)") }
-        if leads { parts.append("맥박을 정하는 자원") }
-        return parts.joined(separator: ", ")
-    }
-
-    /// The highest value among the samples seen in the last minute; nil before any. The newest counts before it is
-    /// stamped and the old stamps stop counting before they are dropped (both happen after this render), so the peak is
-    /// never below the value the ring shows nor older than a minute.
-    private func peak(of vital: VitalSample.Vital) -> Double? {
-        let live = Self.live(seen, at: .now)
-        let newest = system.vitals.last?.id
-        return system.vitals.filter { live[$0.id] != nil || $0.id == newest }.compactMap { $0.value(of: vital) }.max()
-    }
-
-    /// Stamps the newest sample and keeps only the stamps that still count.
     private func stampNewest() {
-        guard let newest = system.vitals.last else { return }
-        let now = Date.now
-        seen = Self.live(seen, at: now)
-        seen[newest.id] = now
-    }
-
-    /// The stamps that still count at `now`: those from the last minute, and none after a gap of more than 10 s (sleep,
-    /// a stall), since their age no longer says how recent they are.
-    private static func live(_ seen: [Int: Date], at now: Date) -> [Int: Date] {
-        guard let latest = seen.values.max(), now.timeIntervalSince(latest) <= 10 else { return [:] }
-        return seen.filter { now.timeIntervalSince($0.value) <= 60 }
+        if let newest = system.vitals.last { peaks.stamp(newest.id) }
     }
 }

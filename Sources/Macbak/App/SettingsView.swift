@@ -54,7 +54,7 @@ struct GeneralSettingsView: View {
             } header: {
                 Text("표시 방식")
             } footer: {
-                Text("맥박 그래프는 최근 10초의 박동을 작은 심전도로, 메모리 그래프는 최근 1분을 그리며 2초마다 한 칸씩 움직입니다. 디스크 그래프는 사용량 막대입니다. 둘 다 끄면 항목 아이콘만 보입니다.")
+                Text("맥박은 늘 가장 바쁜 자원의 부하를 링으로 보여 줍니다. 메모리 그래프는 최근 1분을 그리며 2초마다 한 칸씩 움직이고, 디스크 그래프는 사용량 막대입니다. 둘 다 끄면 항목 아이콘만 보입니다.")
                     .multilineTextAlignment(.leading)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }

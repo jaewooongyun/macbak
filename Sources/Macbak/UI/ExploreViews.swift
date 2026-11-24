@@ -67,8 +67,9 @@ struct ExploreCard: View {
 }
 
 /// The explorer's mark: a magnifying glass that pulses while the model looks, sparkles once it is done.
-/// - Important: Not `.symbolEffect(.pulse, options: .repeating)`: like the effects `Beat` replaced, that redraws the whole
-///   card on the CPU every frame, for as long as the model looks. A repeating layer animation is played by the render server.
+/// - Important: Not `.symbolEffect(.pulse, options: .repeating)`: like the SwiftUI effects the pulse heart once used, it
+///   redraws the whole card on the CPU every frame, for as long as the model looks. A repeating layer animation is played
+///   by the render server.
 struct ExploreGlyph: NSViewRepresentable {
     let active: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion

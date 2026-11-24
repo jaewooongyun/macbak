@@ -80,6 +80,7 @@ enum SnapshotRunner {
             failures += render(RunPanel(run: going, wording: .cleanup, total: { Int64($0).diskText }, done: {}, stop: {}, width: 312, visibleSteps: 4),
                                size: .zero, look: look, to: outputDirectory.appendingPathComponent("runpanel-stop-\(name).png"))
             failures += render(GlyphCatalog(system: system), size: .zero, look: look, to: outputDirectory.appendingPathComponent("glyphs-\(name).png"))
+            failures += render(PulseExamples(), size: .zero, look: look, to: outputDirectory.appendingPathComponent("pulse-examples-\(name).png"))
         }
         exit(failures == 0 ? 0 : 1)
     }
@@ -101,13 +102,39 @@ enum SnapshotRunner {
         return 0
     }
 
+    /// The panel's pulse row with example samples at the edges, at the width the panel gives it: memory leading at 100%
+    /// under critical pressure, no GPU reading, and no sample yet.
+    private struct PulseExamples: View {
+        private static let examples: [(String, VitalSample?, MemoryPressure?)] = [
+            ("메모리 선두 100%", VitalSample(id: 1, cpu: 0.99, gpu: 0.98, memory: 1, memoryLevel: .critical), .critical),
+            ("GPU 없음", VitalSample(id: 2, cpu: 0.12, gpu: nil, memory: 0.45, memoryLevel: .normal), .normal),
+            ("샘플 없음", nil, nil),
+        ]
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: 14) {
+                ForEach(Self.examples, id: \.0) { title, sample, pressure in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(title).font(.caption).foregroundStyle(.tertiary)
+                        HStack(alignment: .center, spacing: 12) {
+                            ConcentricVitalRings(vitals: sample.map { [$0] } ?? [], pressure: pressure)
+                            VitalReadouts(sample: sample, pressure: pressure)
+                        }
+                        .frame(width: 288, alignment: .leading)
+                    }
+                }
+            }
+            .padding(20)
+        }
+    }
+
     /// Every menu bar combination on a light and a dark strip, with its width — the menu bar itself cannot be captured.
     private struct GlyphCatalog: View {
         let system: SystemMonitor
 
         private static let cases: [(String, MenuBarContent)] = [
             ("맥박 숫자", MenuBarContent(pulse: true, memory: false, disk: false, value: true, graph: false)),
-            ("맥박 숫자+그래프", MenuBarContent(pulse: true, memory: false, disk: false, value: true, graph: true)),
+            ("맥박 아이콘만", MenuBarContent(pulse: true, memory: false, disk: false, value: false, graph: false)),
             ("맥박+메모리 숫자", MenuBarContent(pulse: true, memory: true, disk: false, value: true, graph: false)),
             ("메모리 숫자 (기본)", MenuBarContent(memory: true, disk: false, value: true, graph: false)),
             ("메모리 그래프", MenuBarContent(memory: true, disk: false, value: false, graph: true)),

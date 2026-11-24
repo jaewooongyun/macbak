@@ -7,8 +7,6 @@ import SwiftUI
 ///   re-rendered the card on the CPU for every frame; stepping instead looked choppy.
 struct LiveLine: NSViewRepresentable {
     enum Style {
-        /// One P-QRS-T beat per value (0...1), `beats` visible.
-        case heartbeat(beats: Int, baseline: CGFloat)
         /// A trend line with a soft fill, `slots` points visible, on a scale up to `ceiling` (or the largest value).
         case sparkline(slots: Int, ceiling: Double?)
     }
@@ -20,8 +18,6 @@ struct LiveLine: NSViewRepresentable {
     let style: Style
     let tint: Color
     var lineWidth: CGFloat = 1.5
-    /// Fades the oldest part on the left, like a monitor trace.
-    var fadesLeadingEdge = false
     var interval: Double = 2
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -30,7 +26,7 @@ struct LiveLine: NSViewRepresentable {
 
     func updateNSView(_ view: LiveLineView, context: Context) {
         view.update(LiveLineView.Configuration(values: values, sampleID: sampleID, style: style, tint: NSColor(tint), lineWidth: lineWidth,
-                                               fadesLeadingEdge: fadesLeadingEdge, interval: interval, moving: !reduceMotion))
+                                               interval: interval, moving: !reduceMotion))
     }
 }
 
@@ -41,7 +37,6 @@ final class LiveLineView: NSView {
         let style: LiveLine.Style
         let tint: NSColor
         let lineWidth: CGFloat
-        let fadesLeadingEdge: Bool
         let interval: Double
         let moving: Bool
     }
@@ -50,7 +45,6 @@ final class LiveLineView: NSView {
     private let line = CAShapeLayer()
     private let fill = CAGradientLayer()
     private let fillShape = CAShapeLayer()
-    private let fade = CAGradientLayer()
     private var configuration: Configuration?
     private var drawnSize = CGSize.zero
 
@@ -65,10 +59,6 @@ final class LiveLineView: NSView {
         strip.addSublayer(fill)
         strip.addSublayer(line)
         layer?.addSublayer(strip)
-        fade.startPoint = CGPoint(x: 0, y: 0.5)
-        fade.endPoint = CGPoint(x: 1, y: 0.5)
-        fade.colors = [NSColor.clear.cgColor, NSColor.black.cgColor]
-        fade.locations = [0, 0.3]
         setAccessibilityElement(false)
     }
 
@@ -112,8 +102,6 @@ final class LiveLineView: NSView {
             fill.colors = [configuration.tint.withAlphaComponent(0.22).cgColor, configuration.tint.withAlphaComponent(0).cgColor]
         }
         fill.isHidden = area == nil
-        fade.frame = bounds
-        layer?.mask = configuration.fadesLeadingEdge ? fade : nil
         CATransaction.commit()
 
         strip.removeAnimation(forKey: "slide")
@@ -131,11 +119,6 @@ final class LiveLineView: NSView {
     /// the left edge, plus the step width the slide covers.
     private func paths(for configuration: Configuration, in size: CGSize) -> (CGPath, CGPath?, CGFloat) {
         switch configuration.style {
-        case .heartbeat(let beats, let baseline):
-            let slot = size.width / CGFloat(max(beats, 1))
-            let wide = PulseLine.path(loads: configuration.values, beats: beats + 1, in: CGSize(width: size.width + slot, height: size.height),
-                                      baseline: baseline)
-            return (wide.applying(CGAffineTransform(translationX: -slot, y: 0)).cgPath, nil, slot)
         case .sparkline(let slots, let ceiling):
             let values = configuration.values.suffix(slots + 1)
             let step = size.width / CGFloat(max(slots - 1, 1))

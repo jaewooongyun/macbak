@@ -103,25 +103,19 @@ struct MenuBarPanel: View {
 
     private var pulse: some View {
         let reading = system.vitals.isEmpty ? nil : PulseReading(loads: system.vitals.map(\.load))
-        return VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .center, spacing: 12) {
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 5) {
-                        Beat(style: .heart, trigger: system.vitals.last?.id ?? 0).frame(width: 14, height: 14)
-                        Text("맥박").font(.callout.weight(.semibold)).foregroundStyle(.secondary)
-                    }
-                    HStack(alignment: .firstTextBaseline, spacing: 4) {
-                        RollingText(text: reading.map { "\($0.bpm)" } ?? "–", value: Double(reading?.bpm ?? 0), size: 30)
-                        Text("BPM").font(.callout.weight(.semibold)).foregroundStyle(.secondary)
-                        Text(reading?.mood.title ?? "재는 중").font(.callout.weight(.medium)).padding(.leading, 4)
-                    }
-                }
+        let pressure = system.memory?.pressure
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("맥박").font(.callout.weight(.semibold)).foregroundStyle(.secondary)
                 Spacer(minLength: 8)
-                PaceRunner(mood: reading?.mood ?? .calm)
-                    .frame(width: 110, height: 34)
+                Text("\(reading.map { "\($0.bpm)" } ?? "–") BPM · \(reading?.mood.title ?? "재는 중")")
+                    .font(.callout).foregroundStyle(.secondary).monospacedDigit()
             }
             .help(PulseReading.explanation)
-            VitalMeters(sample: system.vitals.last, pressure: system.memory?.pressure, minimumColumnWidth: 80)
+            HStack(alignment: .center, spacing: 12) {
+                ConcentricVitalRings(vitals: system.vitals, pressure: pressure)
+                VitalReadouts(sample: system.vitals.last, pressure: pressure)
+            }
         }
     }
 
