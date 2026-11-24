@@ -166,7 +166,30 @@ enum CacheRules {
         (#"^Library/Caches/node-gyp(/|$)"#, .precheck, "node", "", "Node 헤더를 다시 받습니다"),
         (#"^Library/Caches/electron(-builder)?(/|$)"#, .precheck, "node", "", "Electron을 다시 받습니다"),
         (#"^(\.cache/puppeteer|Library/Caches/ms-playwright|Library/Caches/Cypress)(/|$)"#, .offer, "node", "npx playwright install / npx puppeteer browsers install", "테스트 브라우저를 다시 설치해야 합니다"),
+        // Creative and game tools (2026-11-24): caches their apps make again or download again.
+        (#"^Library/Application Support/Adobe/Common/Media Cache(/|$)"#, .offer, "adobe", "", "Premiere·After Effects가 다시 만듭니다. 프로젝트를 처음 열 때 느려집니다"),
+        (#"^Library/Application Support/Epic/UnrealEngine/Common/DerivedDataCache(/|$)"#, .offer, "unreal", "", "셰이더를 다시 컴파일해 프로젝트를 처음 열 때 오래 걸립니다"),
+        (#"^Library/Unity/Asset Store-5\.x(/|$)"#, .offer, "unity", "", "Asset Store에서 받은 패키지를 다시 받아야 합니다"),
     ]
+
+    /// How to free the space of a large item the rules keep, the tool's own way. Shown on the row only: never run, and
+    /// never a reason to delete anything. A row it matches stays protected and is never shown to the on-device model,
+    /// since deleting its files by hand would break the tool.
+    static let reclaim: [(Pattern, note: String, command: String?)] = [
+        (Pattern(#"^Library/Containers/com\.docker\.docker/Data/vms(/|$)"#),
+         "Docker의 이미지·컨테이너·볼륨이 모두 든 디스크입니다. 파일을 지우지 말고 Docker에서 쓰지 않는 것을 지우세요.", "docker system prune"),
+        (Pattern(#"^\.rustup/toolchains(/|$)"#), "설치한 Rust 툴체인입니다. 쓰지 않는 버전을 명령으로 지우세요.", "rustup toolchain uninstall <이름>"),
+        (Pattern(#"^\.android/avd(/|$)"#), "Android 에뮬레이터 기기입니다. Android Studio의 Device Manager에서 쓰지 않는 기기를 지우세요.", nil),
+        // LM Studio moves a model it imports into this folder, so a model made on this Mac may have no other copy.
+        (Pattern(#"^\.lmstudio/models(/|$)"#), "LM Studio의 모델입니다. 직접 가져온 모델은 다른 곳에 사본이 없을 수 있어, LM Studio의 My Models에서 지우세요.", nil),
+    ]
+
+    /// The `reclaim` row for a path relative to the home folder, if any.
+    /// - Note: Matched on the path as it is, not folded like a sandbox container's (`homePath`): the tip names where the
+    ///   tool really keeps it, as Docker's disk inside its container.
+    static func reclaimTip(_ path: String) -> (note: String, command: String?)? {
+        reclaim.first { $0.0.search(path) }.map { ($0.note, $0.command) }
+    }
 
     /// Developer-table rows (by pattern) whose contents the tool rebuilds on this Mac without downloading anything.
     /// Kept apart from the table so a new row is never trusted by accident; a test checks every entry is in the table.

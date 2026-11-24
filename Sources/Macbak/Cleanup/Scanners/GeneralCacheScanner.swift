@@ -13,7 +13,19 @@ enum GeneralCacheScanner {
         ".cache/*", ".cache/huggingface/*", ".[!.]*/*", ".gradle/caches/*", "go/pkg/*", "Library/pnpm/*",
         "Library/Application Support/*/*", "Library/Containers/*/Data/Library/Caches/*", "Library/Group Containers/*/Library/Caches/*",
         "Library/Developer/Xcode/*", "Library/Developer/CoreSimulator/*", "Library/Android/sdk/*",
+    ] + handPickedPatterns
+    /// Large items of other kinds of work (2026-11-24): Adobe's shared media caches, Unity's and Unreal's caches, Docker's
+    /// disk. Every row only these reach waits for a person's tick, whatever the rules call it: a Chromium cache or a
+    /// cache-named folder there would otherwise start ticked or join the click-free clean-up.
+    static let handPickedPatterns = [
+        "Library/Application Support/Adobe/Common/*", "Library/Unity/*", "Library/Application Support/Epic/UnrealEngine/Common/*",
+        "Library/Containers/com.docker.docker/Data/vms/*/data/*",
     ]
+
+    /// Whether only a `handPickedPatterns` entry reaches the path: it lies under one's part before the first `*`.
+    static func isHandPicked(_ relative: String) -> Bool {
+        handPickedPatterns.contains { pattern in relative.hasPrefix(pattern.prefix { $0 != "*" }) }
+    }
     /// What other scanners own, so nothing is offered twice: app caches and old logs, Xcode build caches, device support
     /// and simulators.
     static let ownedElsewhere = [
@@ -97,6 +109,9 @@ enum GeneralCacheScanner {
         case .model:
             evidence.protectedReason = item.aiPending ? "기기 AI가 확인하기 전까지 지우지 않습니다." : CacheRules.protectedReason(item.rules)
         }
+        // A large kept item says how its tool frees it; the row stays protected.
+        let tip = tier == .keep || tier == .model ? CacheRules.reclaimTip(item.relative) : nil
+        if let tip { evidence.protectedReason = tip.note }
         // A key or disk image deep inside keeps the row whatever the rules said from the first names, and the model
         // never gets to look at it.
         let alarm = tier == .keep ? nil : facts.alarm
@@ -115,8 +130,9 @@ enum GeneralCacheScanner {
             detail: detail.joined(separator: " · "), symbol: symbol(for: item), bytes: facts.bytes, evidence: evidence,
             lowerBound: !facts.isComplete, targets: targets, lastUsed: facts.newest,
             guards: CleanupGuards(watchPaths: [item.url]))
-        row.toolCommand = command ?? (item.rules.devRow?.command.isEmpty == false ? item.rules.devRow?.command : nil)
+        row.toolCommand = command ?? tip?.command ?? (item.rules.devRow?.command.isEmpty == false ? item.rules.devRow?.command : nil)
         row.trusted = (CacheRules.rebuildsLocally(item.rules, path: item.relative) || isAppCache(item)) && facts.noticed == nil
+        row.manualOnly = isHandPicked(item.relative)
         if item.aiPending, alarm == nil {
             row.exploreInput = ExploreInput(url: item.url, relative: item.relative, inside: item.inside, beside: item.beside)
         }
