@@ -185,7 +185,7 @@ struct MenuBarPanel: View {
 
     private var cleanupModule: some View {
         VStack(alignment: .leading, spacing: 10) {
-            ModuleTitle("정리", symbol: "sparkles")
+            ModuleTitle("정리", symbol: "eraser")
             shallowSection
             Divider()
             deepRow
@@ -278,7 +278,7 @@ struct MenuBarPanel: View {
             }
         }
         return ActionRow(symbol: "square.stack.3d.up", title: "깊은 정리", detail: detail) {
-            Button("대시보드…") { openDashboard(.disk) }
+            Button("대시보드") { openDashboard(.disk) }
                 .disabled(popupShown)
         }
     }
@@ -293,7 +293,7 @@ struct MenuBarPanel: View {
     /// The Trash, emptied by Finder on request. Its size stays unknown beforehand: macOS keeps the Trash private.
     private var trashRow: some View {
         ActionRow(symbol: "trash", title: "휴지통", detail: "Finder가 비움 · 되돌릴 수 없음") {
-            Button("비우기…") { withAnimation(reduceMotion ? nil : .bouncy(duration: 0.35)) { confirmingTrash = true } }
+            Button("비우기…") { withAnimation(reduceMotion ? nil : Theme.morph) { confirmingTrash = true } }
                 .disabled(popupShown)
         }
     }
@@ -320,7 +320,7 @@ struct MenuBarPanel: View {
         let bytes = idle.reduce(UInt64(0)) { $0 + $1.memory }
         let detail = simulators == nil ? "확인하는 중…" : idle.isEmpty ? "쓰지 않는 시뮬레이터 없음" : "쓰지 않는 시뮬레이터 \(idle.count)대 · 약 \(bytes.memoryText)"
         return ActionRow(symbol: "memorychip", title: "메모리", detail: detail) {
-            Button("끄기…") { withAnimation(reduceMotion ? nil : .bouncy(duration: 0.35)) { confirmingSimulators = idle } }
+            Button("끄기…") { withAnimation(reduceMotion ? nil : Theme.morph) { confirmingSimulators = idle } }
                 .disabled(idle.isEmpty || popupShown)
         }
     }
@@ -351,7 +351,7 @@ struct MenuBarPanel: View {
                     openWindow(id: "main")
                     NSApp.activate()
                 }
-                .prominentAction()
+                .glassAction()
                 // The panel does not activate the app, so Settings would otherwise open behind other windows.
                 Button("설정…") {
                     NSApp.activate()
@@ -396,7 +396,7 @@ struct MenuBarPanel: View {
     }
 
     private func dismissPopup() {
-        withAnimation(reduceMotion ? nil : .bouncy(duration: 0.35)) {
+        withAnimation(reduceMotion ? nil : Theme.morph) {
             confirmingSimulators = nil
             confirmingTrash = false
         }
@@ -404,7 +404,7 @@ struct MenuBarPanel: View {
 
     /// Deletes for real through the same executor as the window; the runner drops deleted rows from both lists.
     private func performCleanup(_ items: [CleanupCandidate]) {
-        withAnimation(reduceMotion ? nil : .bouncy(duration: 0.4)) {
+        withAnimation(reduceMotion ? nil : Theme.morph) {
             runKind = .cleanup
             run = RunProgress(steps: items.map(\.runStep))
         }
@@ -432,7 +432,7 @@ struct MenuBarPanel: View {
 
     private func switchOff(_ chosen: [BootedSimulator]) {
         guard !chosen.isEmpty else { return }
-        withAnimation(reduceMotion ? nil : .bouncy(duration: 0.4)) {
+        withAnimation(reduceMotion ? nil : Theme.morph) {
             confirmingSimulators = nil
             runKind = .simulators
             run = RunProgress(steps: chosen.map(\.runStep))
@@ -451,7 +451,7 @@ struct MenuBarPanel: View {
     }
 
     private func emptyTrash() {
-        withAnimation(reduceMotion ? nil : .bouncy(duration: 0.4)) {
+        withAnimation(reduceMotion ? nil : Theme.morph) {
             confirmingTrash = false
             runKind = .trash
             run = RunProgress(steps: [RunStep(id: "trash", name: "휴지통", icon: .symbol("trash"), amount: 0, amountText: "–")])
@@ -468,7 +468,7 @@ struct MenuBarPanel: View {
     }
 
     private func closeRun() {
-        withAnimation(reduceMotion ? nil : .bouncy(duration: 0.35)) { run = nil }
+        withAnimation(reduceMotion ? nil : Theme.morph) { run = nil }
     }
 }
 
